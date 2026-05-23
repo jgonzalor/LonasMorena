@@ -1,4 +1,3 @@
-
 import base64
 import html
 import io
@@ -294,6 +293,7 @@ def img_to_base64(path: Path) -> Optional[str]:
 def apply_reviews(df: pd.DataFrame, reviews: Dict[str, dict]) -> pd.DataFrame:
     if df.empty:
         return df.copy()
+
     out = df.copy()
     out["estatus"] = "Pendiente"
     out["supervisor"] = ""
@@ -310,6 +310,7 @@ def apply_reviews(df: pd.DataFrame, reviews: Dict[str, dict]) -> pd.DataFrame:
             out.at[idx, "supervisor"] = review.get("supervisor", "")
             out.at[idx, "nota_supervision"] = review.get("nota_supervision", "")
             out.at[idx, "fecha_revision"] = review.get("fecha_revision", "")
+
             latc = review.get("latitud_corregida", "")
             lonc = review.get("longitud_corregida", "")
             out.at[idx, "latitud_corregida"] = pd.to_numeric(latc, errors="coerce")
@@ -322,25 +323,43 @@ def apply_reviews(df: pd.DataFrame, reviews: Dict[str, dict]) -> pd.DataFrame:
 
 def filter_df(df: pd.DataFrame, distritos, secciones, estatuses, query: str) -> pd.DataFrame:
     out = df.copy()
+
     if distritos:
         out = out[out["distrito_local"].astype(str).isin([str(x) for x in distritos])]
+
     if secciones:
         out = out[out["seccion"].astype(str).isin([str(x) for x in secciones])]
+
     if estatuses:
         out = out[out["estatus"].isin(estatuses)]
+
     q = normalize_text(query).lower()
     if q:
-        cols = [c for c in ["colonia", "direccion", "observaciones", "responsable", "municipio", "seccion", "distrito_local"] if c in out.columns]
+        cols = [
+            c
+            for c in [
+                "colonia",
+                "direccion",
+                "observaciones",
+                "responsable",
+                "municipio",
+                "seccion",
+                "distrito_local",
+            ]
+            if c in out.columns
+        ]
         mask = pd.Series(False, index=out.index)
         for col in cols:
             mask = mask | out[col].astype(str).str.lower().str.contains(re.escape(q), na=False, regex=True)
         out = out[mask]
+
     return out
 
 
 def make_popup_html(row: pd.Series, include_img: bool = True) -> str:
     row_id = int(row["fila_excel"])
     img_html = ""
+
     if include_img:
         imgs = image_files_for_row(row_id)
         if imgs:
@@ -351,10 +370,17 @@ def make_popup_html(row: pd.Series, include_img: bool = True) -> str:
                     <img src='{src}' style='max-width:260px; max-height:190px; border-radius:10px; border:1px solid #e5d8cf;'>
                 </div>
                 """
+
     maps_link = html.escape(str(row.get("link_maps", "")))
-    link_html = f"<a href='{maps_link}' target='_blank' style='color:{MORENA_GUINDA};font-weight:bold'>Abrir en Google Maps</a>" if maps_link else ""
-    status = html.escape(str(row.get('estatus','Pendiente')))
-    status_color = STATUS_COLORS.get(str(row.get('estatus','Pendiente')), MORENA_GUINDA)
+    link_html = (
+        f"<a href='{maps_link}' target='_blank' style='color:{MORENA_GUINDA};font-weight:bold'>Abrir en Google Maps</a>"
+        if maps_link
+        else ""
+    )
+
+    status = html.escape(str(row.get("estatus", "Pendiente")))
+    status_color = STATUS_COLORS.get(str(row.get("estatus", "Pendiente")), MORENA_GUINDA)
+
     body = f"""
     <div style='font-family:Arial; width:290px; color:#272124'>
       <h4 style='margin:0 0 8px 0; color:{MORENA_GUINDA_DARK}'>Lona | Fila Excel {row_id}</h4>
@@ -369,11 +395,13 @@ def make_popup_html(row: pd.Series, include_img: bool = True) -> str:
       {img_html}
     </div>
     """
+
     return body
 
 
 def add_tile_layers(m: folium.Map, selected_tile: str) -> None:
     selected_tile = selected_tile if selected_tile in TILE_OPTIONS else "Calles claro"
+
     for name, cfg in TILE_OPTIONS.items():
         folium.TileLayer(
             tiles=cfg["tiles"],
@@ -392,6 +420,7 @@ def make_map(
     cluster_points: bool = False,
 ) -> folium.Map:
     valid = df.dropna(subset=["latitud_mapa", "longitud_mapa"]).copy()
+
     if valid.empty:
         m = folium.Map(location=[25.79, -109.0], zoom_start=12, tiles=None, control_scale=True)
         add_tile_layers(m, selected_tile)
@@ -402,13 +431,18 @@ def make_map(
     m = folium.Map(location=center, zoom_start=13, tiles=None, control_scale=True)
     add_tile_layers(m, selected_tile)
 
-    target_layer = MarkerCluster(name="Lonas agrupadas").add_to(m) if cluster_points else folium.FeatureGroup(name="Lonas", show=True).add_to(m)
+    target_layer = (
+        MarkerCluster(name="Lonas agrupadas").add_to(m)
+        if cluster_points
+        else folium.FeatureGroup(name="Lonas", show=True).add_to(m)
+    )
 
     for _, row in valid.iterrows():
         row_id = int(row["fila_excel"])
         status = str(row.get("estatus", "Pendiente")) or "Pendiente"
         color = STATUS_COLORS.get(status, MORENA_GUINDA)
         radius = 12 if selected_row_id == row_id else 7
+
         folium.CircleMarker(
             location=[float(row["latitud_mapa"]), float(row["longitud_mapa"])],
             radius=radius,
@@ -438,6 +472,80 @@ def make_map(
     return m
 
 
+def make_supervision_cluster_map(
+    df: pd.DataFrame,
+    selected_tile: str = "Satélite",
+) -> folium.Map:
+    """
+    Mapa general de supervisión con agrupación automática.
+    La burbuja del cluster muestra el total de lonas/registros agrupados.
+    Al acercarse el zoom, el cluster se separa en puntos individuales.
+    """
+    valid = df.dropna(subset=["latitud_mapa", "longitud_mapa"]).copy()
+
+    if valid.empty:
+        m = folium.Map(location=[25.79, -109.0], zoom_start=8, tiles=None, control_scale=True)
+        add_tile_layers(m, selected_tile)
+        Fullscreen().add_to(m)
+        folium.LayerControl(collapsed=True).add_to(m)
+        return m
+
+    center = [valid["latitud_mapa"].mean(), valid["longitud_mapa"].mean()]
+
+    # Zoom inicial amplio para ver el total agrupado; al acercar, se despliegan los puntos.
+    m = folium.Map(location=center, zoom_start=8, tiles=None, control_scale=True)
+    add_tile_layers(m, selected_tile)
+
+    icon_create_function = f"""
+    function(cluster) {{
+        var count = cluster.getChildCount();
+        var size = count < 10 ? 38 : count < 50 ? 46 : 56;
+        return new L.DivIcon({{
+            html: '<div style="background:{MORENA_DORADO}; color:{MORENA_GUINDA_DARK}; width:' + size + 'px; height:' + size + 'px; line-height:' + size + 'px; border-radius:50%; text-align:center; font-weight:900; border:3px solid white; box-shadow:0 6px 16px rgba(91,15,46,.30); font-size:16px;">' + count + '</div>',
+            className: 'marker-cluster-morena',
+            iconSize: new L.Point(size, size)
+        }});
+    }}
+    """
+
+    cluster = MarkerCluster(
+        name="Total de lonas por distribución geográfica",
+        icon_create_function=icon_create_function,
+        spiderfy_on_max_zoom=True,
+        show_coverage_on_hover=True,
+        zoom_to_bounds_on_click=True,
+        disable_clustering_at_zoom=18,
+        max_cluster_radius=80,
+    ).add_to(m)
+
+    for _, row in valid.iterrows():
+        row_id = int(row["fila_excel"])
+        status = str(row.get("estatus", "Pendiente")) or "Pendiente"
+        color = STATUS_COLORS.get(status, MORENA_GUINDA)
+
+        tooltip = (
+            f"Fila {row_id} | Distrito {row.get('distrito_local','')} | "
+            f"Sección {row.get('seccion','')} | {status}"
+        )
+
+        folium.CircleMarker(
+            location=[float(row["latitud_mapa"]), float(row["longitud_mapa"])],
+            radius=7,
+            popup=folium.Popup(make_popup_html(row), max_width=360),
+            tooltip=tooltip,
+            color="#FFFFFF",
+            weight=2,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.92,
+        ).add_to(cluster)
+
+    Fullscreen().add_to(m)
+    MeasureControl(primary_length_unit="meters", secondary_length_unit="kilometers").add_to(m)
+    folium.LayerControl(collapsed=True).add_to(m)
+    return m
+
+
 def kml_escape(value: object) -> str:
     return html.escape(str(value or ""), quote=True)
 
@@ -446,6 +554,7 @@ def hex_to_kml_color(hex_color: str, alpha: str = "ff") -> str:
     color = hex_color.lstrip("#")
     if len(color) != 6:
         color = "8A1538"
+
     rr, gg, bb = color[0:2], color[2:4], color[4:6]
     return f"{alpha}{bb}{gg}{rr}"
 
@@ -453,6 +562,7 @@ def hex_to_kml_color(hex_color: str, alpha: str = "ff") -> str:
 def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision") -> bytes:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     valid = df.dropna(subset=["latitud_mapa", "longitud_mapa"]).copy()
+
     kml_parts = [
         "<?xml version='1.0' encoding='UTF-8'?>",
         "<kml xmlns='http://www.opengis.net/kml/2.2'>",
@@ -466,17 +576,21 @@ def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision"
 
     for distrito, df_d in valid.groupby(valid["distrito_local"].astype(str), dropna=False):
         kml_parts.append(f"<Folder><name>Distrito Local {kml_escape(distrito)}</name>")
+
         for seccion, df_s in df_d.groupby(df_d["seccion"].astype(str), dropna=False):
             kml_parts.append(f"<Folder><name>Sección {kml_escape(seccion)}</name>")
+
             for _, row in df_s.iterrows():
                 row_id = int(row["fila_excel"])
                 status = str(row.get("estatus", "Pendiente")) or "Pendiente"
                 style = "verificado" if status == "Verificado" else "alerta" if status not in ["Pendiente", ""] else "pendiente"
+
                 imgs = image_files_for_row(row_id)
                 img_html = ""
                 if imgs:
                     img_path = f"files/{imgs[0].name}"
                     img_html = f"<br/><br/><img src='{img_path}' width='420'/>"
+
                 desc = f"""
                 <![CDATA[
                 <div style='font-family:Arial'>
@@ -495,18 +609,24 @@ def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision"
                 </div>
                 ]]>
                 """
+
                 name = f"Fila {row_id} | D{row.get('distrito_local','')} S{row.get('seccion','')} | {status}"
-                kml_parts.extend([
-                    "<Placemark>",
-                    f"<name>{kml_escape(name)}</name>",
-                    f"<styleUrl>#{style}</styleUrl>",
-                    f"<description>{desc}</description>",
-                    "<Point>",
-                    f"<coordinates>{float(row['longitud_mapa'])},{float(row['latitud_mapa'])},0</coordinates>",
-                    "</Point>",
-                    "</Placemark>",
-                ])
+
+                kml_parts.extend(
+                    [
+                        "<Placemark>",
+                        f"<name>{kml_escape(name)}</name>",
+                        f"<styleUrl>#{style}</styleUrl>",
+                        f"<description>{desc}</description>",
+                        "<Point>",
+                        f"<coordinates>{float(row['longitud_mapa'])},{float(row['latitud_mapa'])},0</coordinates>",
+                        "</Point>",
+                        "</Placemark>",
+                    ]
+                )
+
             kml_parts.append("</Folder>")
+
         kml_parts.append("</Folder>")
 
     kml_parts.extend(["</Document>", "</kml>"])
@@ -515,6 +635,7 @@ def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision"
     buff = io.BytesIO()
     with zipfile.ZipFile(buff, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("doc.kml", kml_text.encode("utf-8"))
+
         added = set()
         for row_id in valid["fila_excel"].dropna().astype(int).tolist():
             for img in image_files_for_row(row_id):
@@ -522,6 +643,7 @@ def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision"
                 if arc not in added:
                     zf.write(img, arc)
                     added.add(arc)
+
     return buff.getvalue()
 
 
@@ -530,7 +652,12 @@ def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 
 def render_kpi(label: str, value: object, note: str = "") -> None:
-    note_html = f"<div style='font-size:.77rem;color:#7b6c72;margin-top:6px'>{html.escape(str(note))}</div>" if note else ""
+    note_html = (
+        f"<div style='font-size:.77rem;color:#7b6c72;margin-top:6px'>{html.escape(str(note))}</div>"
+        if note
+        else ""
+    )
+
     st.markdown(
         f"""
         <div class='kpi-card'>
@@ -546,7 +673,10 @@ def render_kpi(label: str, value: object, note: str = "") -> None:
 def render_status_legend() -> None:
     rows = []
     for status in STATUS_OPTIONS:
-        rows.append(f"<div style='margin:7px 0'><span class='legend-dot' style='background:{STATUS_COLORS[status]}'></span>{html.escape(status)}</div>")
+        rows.append(
+            f"<div style='margin:7px 0'><span class='legend-dot' style='background:{STATUS_COLORS[status]}'></span>{html.escape(status)}</div>"
+        )
+
     st.markdown("".join(rows), unsafe_allow_html=True)
 
 
@@ -572,28 +702,50 @@ if df.empty:
     st.error("No se encontraron datos mapeables. Verifica que exista data/lonas_mapeables.csv.")
     st.stop()
 
+
 # -----------------------------
 # Sidebar: filtros y mapa
 # -----------------------------
 st.sidebar.markdown("### Filtros")
-all_distritos = sorted(df["distrito_local"].dropna().astype(str).unique().tolist(), key=lambda x: (len(x), x))
-sel_distritos = st.sidebar.multiselect("Distrito local", all_distritos, default=all_distritos)
+
+all_distritos = sorted(
+    df["distrito_local"].dropna().astype(str).unique().tolist(),
+    key=lambda x: (len(x), x),
+)
+
+sel_distritos = st.sidebar.multiselect(
+    "Distrito local",
+    all_distritos,
+    default=all_distritos,
+)
 
 seccion_source = df[df["distrito_local"].astype(str).isin(sel_distritos)] if sel_distritos else df
-all_secciones = sorted(seccion_source["seccion"].dropna().astype(str).unique().tolist(), key=lambda x: (len(x), x))
+
+all_secciones = sorted(
+    seccion_source["seccion"].dropna().astype(str).unique().tolist(),
+    key=lambda x: (len(x), x),
+)
+
 sel_secciones = st.sidebar.multiselect("Sección", all_secciones)
 sel_estatus = st.sidebar.multiselect("Estatus", STATUS_OPTIONS, default=[])
 query = st.sidebar.text_input("Buscar", placeholder="Colonia, dirección, sección...")
 
 st.sidebar.divider()
 st.sidebar.markdown("### Visualización del mapa")
-map_style = st.sidebar.selectbox("Tipo de mapa base", list(TILE_OPTIONS.keys()), index=0)
+
+map_style = st.sidebar.selectbox(
+    "Tipo de mapa base",
+    list(TILE_OPTIONS.keys()),
+    index=0,
+)
+
 cluster_points = st.sidebar.checkbox("Agrupar puntos cercanos", value=False)
 
 filtered = filter_df(df, sel_distritos, sel_secciones, sel_estatus, query)
 
 st.sidebar.divider()
 st.sidebar.markdown("### Acciones rápidas")
+
 st.sidebar.download_button(
     "Descargar revisión filtrada CSV",
     dataframe_to_csv_bytes(filtered),
@@ -601,38 +753,51 @@ st.sidebar.download_button(
     mime="text/csv",
     use_container_width=True,
 )
+
+
 # -----------------------------
 # KPIs
 # -----------------------------
 k1, k2, k3, k4, k5 = st.columns(5)
+
 with k1:
     render_kpi("Registros mapeados", len(df), "con coordenada")
+
 with k2:
     render_kpi("En filtro", len(filtered), "según selección")
+
 with k3:
     render_kpi("Verificados", int((df["estatus"] == "Verificado").sum()), "validación positiva")
+
 with k4:
     render_kpi("Pendientes", int((df["estatus"] == "Pendiente").sum()), "por revisar")
+
 with k5:
     render_kpi("Sin coordenada", len(pendientes), "requieren captura")
 
 st.write("")
 
+
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_map, tab_summary, tab_review, tab_table, tab_pending, tab_export, tab_help = st.tabs([
-    "Mapa",
-    "Resumen",
-    "Supervisión",
-    "Tabla de supervisión",
-    "Pendientes sin coordenada",
-    "Exportar",
-    "Guía rápida",
-])
+tab_map, tab_supervision_map, tab_summary, tab_review, tab_table, tab_pending, tab_export, tab_help = st.tabs(
+    [
+        "Mapa",
+        "Mapa de supervisión",
+        "Resumen",
+        "Supervisión",
+        "Tabla de supervisión",
+        "Pendientes sin coordenada",
+        "Exportar",
+        "Guía rápida",
+    ]
+)
+
 
 with tab_map:
     c1, c2 = st.columns([3.25, 1])
+
     with c2:
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         st.subheader("Leyenda")
@@ -642,74 +807,169 @@ with tab_map:
 
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         st.write("**Distribución por estatus**")
+
         if filtered.empty:
             st.caption("Sin registros con los filtros actuales.")
         else:
-            st.dataframe(filtered["estatus"].value_counts().rename_axis("estatus").reset_index(name="total"), hide_index=True, use_container_width=True)
+            st.dataframe(
+                filtered["estatus"].value_counts().rename_axis("estatus").reset_index(name="total"),
+                hide_index=True,
+                use_container_width=True,
+            )
+
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("<div class='note-box'>Puedes cambiar el mapa base desde el panel izquierdo: calles, satélite, terreno o modo oscuro.</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='note-box'>Puedes cambiar el mapa base desde el panel izquierdo: calles, satélite, terreno o modo oscuro.</div>",
+            unsafe_allow_html=True,
+        )
+
     with c1:
         selected_for_map = st.session_state.get("selected_row_id")
-        m = make_map(filtered, selected_for_map, selected_tile=map_style, cluster_points=cluster_points)
+        m = make_map(
+            filtered,
+            selected_for_map,
+            selected_tile=map_style,
+            cluster_points=cluster_points,
+        )
         st_folium(m, width=1280, height=680, returned_objects=[])
+
+
+with tab_supervision_map:
+    st.subheader("Mapa de supervisión")
+
+    st.caption(
+        "Vista general agrupada: cada burbuja muestra el total de lonas/registros en esa zona. "
+        "Al acercarte con zoom, los puntos se despliegan individualmente."
+    )
+
+    ms1, ms2 = st.columns([3.25, 1])
+
+    with ms2:
+        st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+        st.write("**Configuración**")
+
+        supervision_tile = st.selectbox(
+            "Mapa base",
+            list(TILE_OPTIONS.keys()),
+            index=list(TILE_OPTIONS.keys()).index(map_style) if map_style in TILE_OPTIONS else 0,
+            key="supervision_tile",
+        )
+
+        st.caption("El cluster muestra el total. Click sobre la burbuja para acercar y separar puntos.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+        st.write("**Totales en filtro**")
+        render_kpi("Registros agrupados", len(filtered), "según filtros activos")
+
+        if not filtered.empty:
+            resumen_dist = (
+                filtered.groupby("distrito_local", dropna=False)
+                .size()
+                .reset_index(name="total")
+                .sort_values("total", ascending=False)
+            )
+            st.dataframe(resumen_dist, hide_index=True, use_container_width=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+        st.write("**Leyenda**")
+        render_status_legend()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with ms1:
+        m_supervision = make_supervision_cluster_map(filtered, selected_tile=supervision_tile)
+        st_folium(m_supervision, width=1280, height=720, returned_objects=[])
+
 
 with tab_summary:
     st.subheader("Resumen operativo")
+
     a, b = st.columns([1, 1])
+
     with a:
         st.write("**Registros por distrito y sección**")
+
         if filtered.empty:
             st.warning("No hay registros con los filtros actuales.")
         else:
-            dist = filtered.groupby(["distrito_local", "seccion"], dropna=False).size().reset_index(name="total")
-            st.dataframe(dist.sort_values(["distrito_local", "seccion"]), hide_index=True, use_container_width=True)
+            dist = (
+                filtered.groupby(["distrito_local", "seccion"], dropna=False)
+                .size()
+                .reset_index(name="total")
+            )
+            st.dataframe(
+                dist.sort_values(["distrito_local", "seccion"]),
+                hide_index=True,
+                use_container_width=True,
+            )
+
     with b:
         st.write("**Estatus de supervisión**")
-        status_df = filtered["estatus"].value_counts().rename_axis("estatus").reset_index(name="total") if not filtered.empty else pd.DataFrame(columns=["estatus", "total"])
+
+        status_df = (
+            filtered["estatus"].value_counts().rename_axis("estatus").reset_index(name="total")
+            if not filtered.empty
+            else pd.DataFrame(columns=["estatus", "total"])
+        )
+
         st.dataframe(status_df, hide_index=True, use_container_width=True)
+
         st.write("**Avance general**")
         total = len(df)
         verificados = int((df["estatus"] == "Verificado").sum())
         avance = (verificados / total * 100) if total else 0
+
         st.progress(avance / 100)
         st.caption(f"{avance:.1f}% verificado sobre registros mapeados.")
 
+
 with tab_review:
     st.subheader("Revisión individual")
+
     if filtered.empty:
         st.warning("No hay registros con los filtros actuales.")
     else:
         filtered_options = filtered.sort_values(["distrito_local", "seccion", "fila_excel"]).copy()
+
         option_labels = {
             int(row.fila_excel): f"Fila {int(row.fila_excel)} | D{row.distrito_local} S{row.seccion} | {row.colonia} | {str(row.direccion)[:55]}"
             for _, row in filtered_options.iterrows()
         }
+
         default_id = st.session_state.get("selected_row_id")
         ids = list(option_labels.keys())
         default_index = ids.index(default_id) if default_id in ids else 0
+
         selected_id = st.selectbox(
             "Selecciona el registro a revisar",
             ids,
             index=default_index,
             format_func=lambda x: option_labels.get(x, str(x)),
         )
+
         st.session_state["selected_row_id"] = selected_id
+
         row = df[df["fila_excel"].astype(int) == int(selected_id)].iloc[0]
         key = str(int(selected_id))
         current_review = reviews.get(key, {})
 
         left, right = st.columns([1.15, 1])
+
         with left:
             st.markdown(f"### Fila Excel {selected_id}")
             st.write(f"**Distrito local:** {row.get('distrito_local','')}  |  **Sección:** {row.get('seccion','')}")
             st.write(f"**Colonia:** {row.get('colonia','')}")
             st.write(f"**Dirección:** {row.get('direccion','')}")
             st.write(f"**Observaciones origen:** {row.get('observaciones','')}")
+
             if str(row.get("link_maps", "")):
                 st.link_button("Abrir link original de Google Maps", str(row.get("link_maps")))
 
             imgs = image_files_for_row(selected_id)
+
             if imgs:
                 st.markdown("**Evidencia fotográfica**")
                 for img in imgs[:3]:
@@ -720,31 +980,59 @@ with tab_review:
         with right:
             with st.form("form_revision"):
                 estatus_actual = current_review.get("estatus", row.get("estatus", "Pendiente")) or "Pendiente"
-                estatus = st.selectbox("Estatus de supervisión", STATUS_OPTIONS, index=STATUS_OPTIONS.index(estatus_actual) if estatus_actual in STATUS_OPTIONS else 0)
-                supervisor = st.text_input("Supervisor", value=current_review.get("supervisor", ""), placeholder="Nombre de quien revisa")
-                nota = st.text_area("Nota de supervisión", value=current_review.get("nota_supervision", ""), height=120)
+
+                estatus = st.selectbox(
+                    "Estatus de supervisión",
+                    STATUS_OPTIONS,
+                    index=STATUS_OPTIONS.index(estatus_actual) if estatus_actual in STATUS_OPTIONS else 0,
+                )
+
+                supervisor = st.text_input(
+                    "Supervisor",
+                    value=current_review.get("supervisor", ""),
+                    placeholder="Nombre de quien revisa",
+                )
+
+                nota = st.text_area(
+                    "Nota de supervisión",
+                    value=current_review.get("nota_supervision", ""),
+                    height=120,
+                )
 
                 st.markdown("**Corrección opcional de coordenadas**")
                 st.caption("Déjalas vacías si la ubicación original es correcta.")
-                lat_corr = st.text_input("Latitud corregida", value=str(current_review.get("latitud_corregida", "") or ""))
-                lon_corr = st.text_input("Longitud corregida", value=str(current_review.get("longitud_corregida", "") or ""))
+
+                lat_corr = st.text_input(
+                    "Latitud corregida",
+                    value=str(current_review.get("latitud_corregida", "") or ""),
+                )
+
+                lon_corr = st.text_input(
+                    "Longitud corregida",
+                    value=str(current_review.get("longitud_corregida", "") or ""),
+                )
 
                 guardar = st.form_submit_button("Guardar revisión", use_container_width=True)
+
                 if guardar:
                     lat_val = lat_corr.strip()
                     lon_val = lon_corr.strip()
+
                     if (lat_val and not lon_val) or (lon_val and not lat_val):
                         st.error("Captura latitud y longitud corregidas, o deja ambas vacías.")
                     else:
                         coord_ok = True
+
                         if lat_val and lon_val:
                             try:
                                 lat_f = float(lat_val)
                                 lon_f = float(lon_val)
+
                                 if not (-90 <= lat_f <= 90 and -180 <= lon_f <= 180):
                                     coord_ok = False
                             except Exception:
                                 coord_ok = False
+
                         if not coord_ok:
                             st.error("Las coordenadas corregidas no son válidas.")
                         else:
@@ -756,31 +1044,78 @@ with tab_review:
                                 "longitud_corregida": lon_val,
                                 "fecha_revision": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             }
+
                             save_reviews(reviews)
+
                             st.success("Revisión guardada. El mapa se actualizará con el nuevo estatus/coordenada.")
                             st.rerun()
 
             st.markdown("**Vista rápida del punto**")
-            mini = apply_reviews(df[df["fila_excel"].astype(int) == int(selected_id)], reviews)
-            st_folium(make_map(mini, selected_id, selected_tile=map_style, cluster_points=False), width=650, height=320, returned_objects=[])
+
+            mini = apply_reviews(
+                df[df["fila_excel"].astype(int) == int(selected_id)],
+                reviews,
+            )
+
+            st_folium(
+                make_map(
+                    mini,
+                    selected_id,
+                    selected_tile=map_style,
+                    cluster_points=False,
+                ),
+                width=650,
+                height=320,
+                returned_objects=[],
+            )
+
 
 with tab_table:
     st.subheader("Tabla filtrada")
+
     show_cols = [
-        "fila_excel", "fecha", "municipio", "distrito_local", "seccion", "colonia", "direccion",
-        "lonas_colocadas", "meta", "avance", "estatus", "supervisor", "nota_supervision", "fecha_revision",
-        "latitud_mapa", "longitud_mapa", "observaciones", "link_maps",
+        "fila_excel",
+        "fecha",
+        "municipio",
+        "distrito_local",
+        "seccion",
+        "colonia",
+        "direccion",
+        "lonas_colocadas",
+        "meta",
+        "avance",
+        "estatus",
+        "supervisor",
+        "nota_supervision",
+        "fecha_revision",
+        "latitud_mapa",
+        "longitud_mapa",
+        "observaciones",
+        "link_maps",
     ]
+
     show_cols = [c for c in show_cols if c in filtered.columns]
-    st.dataframe(filtered[show_cols].sort_values(["distrito_local", "seccion", "fila_excel"]), use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        filtered[show_cols].sort_values(["distrito_local", "seccion", "fila_excel"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
 
 with tab_pending:
     st.subheader("Registros pendientes sin coordenada directa")
-    st.caption("Estos registros traen links cortos de Google Maps o no contienen latitud/longitud directa. Hay que resolverlos o capturar coordenadas manualmente.")
+
+    st.caption(
+        "Estos registros traen links cortos de Google Maps o no contienen latitud/longitud directa. "
+        "Hay que resolverlos o capturar coordenadas manualmente."
+    )
+
     if pendientes.empty:
         st.success("No hay pendientes sin coordenada.")
     else:
         st.dataframe(pendientes, use_container_width=True, hide_index=True)
+
         st.download_button(
             "Descargar pendientes CSV",
             dataframe_to_csv_bytes(pendientes),
@@ -789,14 +1124,17 @@ with tab_pending:
             use_container_width=True,
         )
 
+
 with tab_export:
     st.subheader("Exportaciones")
+
     st.write("Descarga los avances de supervisión y genera un KMZ actualizado con los estatus y coordenadas corregidas.")
 
     export_all = st.checkbox("Exportar todos los registros mapeados", value=True)
     export_df = df if export_all else filtered
 
     c1, c2, c3 = st.columns(3)
+
     with c1:
         st.download_button(
             "CSV de supervisión",
@@ -805,6 +1143,7 @@ with tab_export:
             mime="text/csv",
             use_container_width=True,
         )
+
     with c2:
         st.download_button(
             "JSON de revisiones",
@@ -813,8 +1152,10 @@ with tab_export:
             mime="application/json",
             use_container_width=True,
         )
+
     with c3:
         kmz_bytes = build_kmz_bytes(export_df)
+
         st.download_button(
             "KMZ actualizado",
             kmz_bytes,
@@ -823,20 +1164,26 @@ with tab_export:
             use_container_width=True,
         )
 
-    st.info("En Streamlit Cloud el archivo JSON local puede ser temporal. Para uso formal multiusuario conviene conectar Supabase, Firebase o una base SQLite persistente en servidor propio.")
+    st.info(
+        "En Streamlit Cloud el archivo JSON local puede ser temporal. "
+        "Para uso formal multiusuario conviene conectar Supabase, Firebase o una base SQLite persistente en servidor propio."
+    )
+
 
 with tab_help:
     st.subheader("Guía rápida de uso")
+
     st.markdown(
         """
         **Flujo recomendado:**
 
         1. Filtra por distrito local, sección, estatus o colonia.
         2. Cambia el mapa base desde el panel izquierdo si necesitas vista de calles, satélite, terreno o modo oscuro.
-        3. Revisa el punto en el mapa y abre la evidencia fotográfica.
-        4. Entra a **Supervisión**, selecciona la fila y marca el estatus.
-        5. Si la ubicación está mal, captura latitud y longitud corregidas.
-        6. Exporta CSV/JSON/KMZ actualizado desde la pestaña **Exportar**.
+        3. Entra a **Mapa de supervisión** para ver el total agrupado de lonas por distribución geográfica.
+        4. Revisa el punto en el mapa y abre la evidencia fotográfica.
+        5. Entra a **Supervisión**, selecciona la fila y marca el estatus.
+        6. Si la ubicación está mal, captura latitud y longitud corregidas.
+        7. Exporta CSV/JSON/KMZ actualizado desde la pestaña **Exportar**.
 
         **Estatus sugeridos:**
 
@@ -846,6 +1193,6 @@ with tab_help:
         - **Retirar/Reponer lona:** hay incidencia física con la lona.
         - **No localizada:** no se encontró en campo.
 
-        **Compartir avances:** esta versión ya no incluye botón directo de WhatsApp. Lo recomendado es subirla a Streamlit Cloud y compartir el enlace privado o exportar el KMZ/CSV.
+        **Compartir avances:** lo recomendado es subir la app a Streamlit Cloud y compartir el enlace privado, o exportar el KMZ/CSV para revisión externa.
         """
     )
