@@ -1,11 +1,10 @@
 import base64
-import hashlib
 import html
 import io
 import json
 import re
 import sqlite3
-import time
+import unicodedata
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -16,28 +15,28 @@ import folium
 import pandas as pd
 import requests
 import streamlit as st
-from folium.plugins import MarkerCluster, Fullscreen, MeasureControl
+from folium.plugins import Fullscreen, MarkerCluster, MeasureControl
 from streamlit_folium import st_folium
 
-try:
-    import openpyxl
-except Exception:
-    openpyxl = None
 
+# =========================================================
+# CONFIGURACIÓN GENERAL
+# =========================================================
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 IMG_DIR = DATA_DIR / "evidencias"
 UPLOADS_DIR = DATA_DIR / "uploads"
-DB_PATH = DATA_DIR / "lonas_supervision.db"
+DB_FILE = DATA_DIR / "lonas_supervision.db"
+
 MAPEABLES_CSV = DATA_DIR / "lonas_mapeables.csv"
 PENDIENTES_CSV = DATA_DIR / "lonas_pendientes_sin_coordenada.csv"
 
-for folder in [DATA_DIR, IMG_DIR, UPLOADS_DIR]:
-    folder.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+IMG_DIR.mkdir(parents=True, exist_ok=True)
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-
-# Paleta Morena con contraste alto para escritorio y celular.
+# Paleta Morena con alto contraste.
 MORENA_GUINDA = "#7A0026"
 MORENA_GUINDA_DARK = "#4A0018"
 MORENA_GUINDA_SOFT = "#A51C48"
@@ -64,8 +63,14 @@ STATUS_COLORS = {
 }
 
 TILE_OPTIONS = {
-    "Calles claro": {"tiles": "CartoDB positron", "attr": "CartoDB / OpenStreetMap"},
-    "Calles OSM": {"tiles": "OpenStreetMap", "attr": "OpenStreetMap"},
+    "Calles claro": {
+        "tiles": "CartoDB positron",
+        "attr": "CartoDB / OpenStreetMap",
+    },
+    "Calles OSM": {
+        "tiles": "OpenStreetMap",
+        "attr": "OpenStreetMap",
+    },
     "Satélite": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         "attr": "Esri World Imagery",
@@ -74,18 +79,11 @@ TILE_OPTIONS = {
         "tiles": "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
         "attr": "Map data: OpenStreetMap contributors, SRTM | Map style: OpenTopoMap",
     },
-    "Oscuro": {"tiles": "CartoDB dark_matter", "attr": "CartoDB / OpenStreetMap"},
+    "Oscuro": {
+        "tiles": "CartoDB dark_matter",
+        "attr": "CartoDB / OpenStreetMap",
+    },
 }
-
-BASE_COLUMNS = [
-    "id", "archivo_origen", "fila_excel", "fecha", "responsable", "municipio", "distrito_local",
-    "seccion", "colonia", "direccion", "ciudad_comunidad", "nombre_enlace", "celular",
-    "link_maps", "url_maps_expandida", "lonas_colocadas", "fotografia", "observaciones",
-    "latitud", "longitud", "latitud_corregida", "longitud_corregida", "fuente_coordenada",
-    "estado_coordenada", "estatus", "supervisor", "nota_supervision", "fecha_revision",
-    "fecha_carga", "registro_hash",
-]
-
 
 st.set_page_config(
     page_title="Supervisión de Lonas",
@@ -93,6 +91,164 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# =========================================================
+# CONTROL DE ACCESO SENCILLO POR SECRETS
+# =========================================================
+
+def get_auth_users() -> Dict[str, dict]:
+    """
+    Lee usuarios desde Streamlit Secrets.
+
+    Ejemplo en .streamlit/secrets.toml o Streamlit Cloud Secrets:
+
+    [auth.users.admin]
+    name = "Administrador"
+    role = "admin"
+    password = "1234"
+    """
+    try:
+        return dict(st.secrets["auth"]["users"])
+    except Exception:
+        return {}
+
+
+def check_login(username: str, password: str) -> Tuple[bool, dict]:
+    users = get_auth_users()
+
+    username = str(username or "").strip().lower()
+    password = str(password or "").strip()
+
+    if not username or username not in users:
+        return False, {}
+
+    user_data = dict(users[username])
+    saved_password = str(user_data.get("password", "")).strip()
+
+    if password == saved_password:
+        return True, user_data
+
+    return False, {}
+
+
+def login_required() -> None:
+    if st.session_state.get("authenticated", False):
+        st.sidebar.markdown("---")
+        st.sidebar.success(f"Acceso: {st.session_state.get('auth_name', 'Usuario')}")
+        st.sidebar.caption(f"Rol: {st.session_state.get('auth_role', 'usuario')}")
+
+        if st.sidebar.button("Cerrar sesión", use_container_width=True):
+            for key in ["authenticated", "auth_user", "auth_name", "auth_role"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+
+        return
+
+    users = get_auth_users()
+
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] {
+            display: none;
+        }
+
+        header[data-testid="stHeader"] {
+            visibility: hidden;
+            height: 0rem;
+        }
+
+        .stApp {
+            background: linear-gradient(180deg, #fffaf2 0%, #fff8ef 60%, #ffffff 100%);
+        }
+
+        .block-container {
+            max-width: 560px;
+            padding-top: 5rem;
+        }
+
+        .login-card {
+            background: #ffffff;
+            border: 2px solid rgba(122,0,38,.22);
+            border-radius: 24px;
+            padding: 30px;
+            box-shadow: 0 18px 42px rgba(74,0,24,.18);
+            margin-bottom: 18px;
+        }
+
+        .login-title {
+            color: #4A0018;
+            font-size: 2rem;
+            font-weight: 900;
+            margin-bottom: 6px;
+        }
+
+        .login-subtitle {
+            color: #5f5055;
+            font-size: .98rem;
+            margin-bottom: 4px;
+            font-weight: 600;
+        }
+
+        div[data-testid="stFormSubmitButton"] button {
+            background: #7A0026 !important;
+            color: #ffffff !important;
+            border-radius: 12px !important;
+            font-weight: 900 !important;
+            border: 2px solid #4A0018 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="login-card">
+            <div class="login-title">Acceso restringido</div>
+            <div class="login-subtitle">Supervisión de Lonas</div>
+            <div>Ingresa con usuario y contraseña autorizados.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not users:
+        st.error("No hay usuarios configurados en Secrets.")
+        st.info(
+            "Agrega usuarios en Streamlit Cloud → App → Settings → Secrets, "
+            "o en local dentro de .streamlit/secrets.toml."
+        )
+        st.stop()
+
+    with st.form("login_form"):
+        username = st.text_input("Usuario")
+        password = st.text_input("Contraseña", type="password")
+        submitted = st.form_submit_button("Entrar", use_container_width=True)
+
+        if submitted:
+            ok, user_data = check_login(username, password)
+
+            if ok:
+                clean_user = str(username).strip().lower()
+                st.session_state["authenticated"] = True
+                st.session_state["auth_user"] = clean_user
+                st.session_state["auth_name"] = user_data.get("name", clean_user)
+                st.session_state["auth_role"] = user_data.get("role", "usuario")
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos.")
+
+    st.stop()
+
+
+login_required()
+
+
+# =========================================================
+# ESTILOS GENERALES
+# =========================================================
 
 st.markdown(
     f"""
@@ -286,10 +442,6 @@ st.markdown(
         font-weight: 900;
     }}
 
-    p, span, label, div {{
-        color: inherit;
-    }}
-
     iframe {{
         border-radius: 16px;
         border: 2px solid rgba(122,0,38,.24) !important;
@@ -303,12 +455,35 @@ st.markdown(
             padding-top: .6rem;
             padding-bottom: 6rem;
         }}
-        .hero-card {{ padding: 18px 18px; border-radius: 18px; }}
-        .hero-title {{ font-size: 1.55rem; }}
-        .hero-subtitle {{ font-size: .9rem; }}
-        .kpi-card {{ min-height: 86px; padding: 14px 15px; border: 2px solid rgba(122,0,38,.24); }}
-        .kpi-number {{ font-size: 2rem; }}
-        .kpi-label {{ font-size: .75rem; color: var(--guinda-dark); }}
+
+        .hero-card {{
+            padding: 18px 18px;
+            border-radius: 18px;
+        }}
+
+        .hero-title {{
+            font-size: 1.55rem;
+        }}
+
+        .hero-subtitle {{
+            font-size: .9rem;
+        }}
+
+        .kpi-card {{
+            min-height: 86px;
+            padding: 14px 15px;
+            border: 2px solid rgba(122,0,38,.24);
+        }}
+
+        .kpi-number {{
+            font-size: 2rem;
+        }}
+
+        .kpi-label {{
+            font-size: .75rem;
+            color: var(--guinda-dark);
+        }}
+
         div[data-baseweb="tab-list"] {{
             background: #fff8ef;
             border-radius: 12px 12px 0 0;
@@ -316,14 +491,22 @@ st.markdown(
             padding-left: 4px;
             padding-right: 4px;
         }}
+
         button[data-baseweb="tab"] {{
             background: #e2c8bc !important;
             color: var(--guinda-dark) !important;
             padding: 10px 16px !important;
             min-width: max-content !important;
         }}
-        button[data-baseweb="tab"][aria-selected="true"] {{ background: var(--guinda) !important; color: #ffffff !important; }}
-        iframe {{ min-height: 560px !important; }}
+
+        button[data-baseweb="tab"][aria-selected="true"] {{
+            background: var(--guinda) !important;
+            color: #ffffff !important;
+        }}
+
+        iframe {{
+            min-height: 560px !important;
+        }}
     }}
     </style>
     """,
@@ -331,11 +514,68 @@ st.markdown(
 )
 
 
-# -----------------------------
-# Base de datos SQLite
-# -----------------------------
+# =========================================================
+# UTILIDADES GENERALES
+# =========================================================
+
+def clean_text(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value or "").strip()
+
+
+def to_float(value: object) -> Optional[float]:
+    text = clean_text(value)
+
+    if not text:
+        return None
+
+    text = text.replace(",", ".")
+
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def normalize_header(text: object) -> str:
+    text = clean_text(text).lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"\s+", " ", text)
+    return text.replace("\n", " ").strip()
+
+
+def make_unique_headers(headers: List[object]) -> List[str]:
+    counts = {}
+    out = []
+
+    for h in headers:
+        base = clean_text(h)
+
+        if not base:
+            base = "columna"
+
+        if base not in counts:
+            counts[base] = 1
+            out.append(base)
+        else:
+            counts[base] += 1
+            out.append(f"{base}__{counts[base]}")
+
+    return out
+
+
+def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+
+# =========================================================
+# BASE DE DATOS SQLITE
+# =========================================================
+
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -346,7 +586,9 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS lonas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                unique_key TEXT UNIQUE,
                 archivo_origen TEXT,
+                hoja_origen TEXT,
                 fila_excel INTEGER,
                 fecha TEXT,
                 responsable TEXT,
@@ -359,25 +601,25 @@ def init_db() -> None:
                 nombre_enlace TEXT,
                 celular TEXT,
                 link_maps TEXT,
-                url_maps_expandida TEXT,
-                lonas_colocadas REAL DEFAULT 1,
+                url_expandida TEXT,
+                lonas_colocadas REAL,
                 fotografia TEXT,
                 observaciones TEXT,
                 latitud REAL,
                 longitud REAL,
-                latitud_corregida REAL,
-                longitud_corregida REAL,
-                fuente_coordenada TEXT DEFAULT 'pendiente',
-                estado_coordenada TEXT DEFAULT 'pendiente',
+                fuente_coordenada TEXT,
+                estado_coordenada TEXT,
                 estatus TEXT DEFAULT 'Pendiente',
                 supervisor TEXT,
                 nota_supervision TEXT,
                 fecha_revision TEXT,
                 fecha_carga TEXT,
-                registro_hash TEXT UNIQUE
+                usuario_carga TEXT,
+                evidencia_rutas TEXT
             )
             """
         )
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS uploads (
@@ -385,260 +627,181 @@ def init_db() -> None:
                 archivo TEXT,
                 registros_leidos INTEGER,
                 registros_insertados INTEGER,
-                duplicados INTEGER,
+                registros_duplicados INTEGER,
                 registros_mapeables INTEGER,
                 registros_pendientes INTEGER,
-                resolver_links INTEGER,
-                fecha_carga TEXT
+                fecha_carga TEXT,
+                usuario_carga TEXT
             )
             """
         )
+
         conn.commit()
 
 
-def db_count_lonas() -> int:
+def db_count() -> int:
     with get_conn() as conn:
-        row = conn.execute("SELECT COUNT(*) AS n FROM lonas").fetchone()
-        return int(row["n"] or 0)
+        row = conn.execute("SELECT COUNT(*) AS total FROM lonas").fetchone()
+        return int(row["total"] or 0)
 
 
-def clean_value(value: object) -> str:
-    """
-    Limpia valores escalares de Excel/SQLite.
-    También evita el error: The truth value of a Series is ambiguous,
-    que aparece cuando un Excel trae encabezados duplicados como CELULAR/CELULAR.
-    """
-    if value is None:
-        return ""
-
-    # Si por columnas duplicadas llega una Serie/lista, toma el primer valor útil.
-    if isinstance(value, pd.Series):
-        for item in value.tolist():
-            cleaned = clean_value(item)
-            if cleaned:
-                return cleaned
-        return ""
-
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            cleaned = clean_value(item)
-            if cleaned:
-                return cleaned
-        return ""
-
-    try:
-        if pd.isna(value):
-            return ""
-    except Exception:
-        pass
-
-    text = str(value).strip()
-    if text.lower() in ["nan", "none", "nat"]:
-        return ""
-    return text
-
-
-def to_float(value: object) -> Optional[float]:
-    text = clean_value(value)
-    if not text:
-        return None
-    text = text.replace(",", ".")
-    try:
-        return float(text)
-    except Exception:
-        return None
-
-
-def build_hash(row: Dict[str, object]) -> str:
+def create_unique_key(record: dict) -> str:
     parts = [
-        clean_value(row.get("link_maps")),
-        clean_value(row.get("direccion")),
-        clean_value(row.get("colonia")),
-        clean_value(row.get("responsable")),
-        clean_value(row.get("distrito_local")),
-        clean_value(row.get("seccion")),
-        clean_value(row.get("nombre_enlace")),
-        clean_value(row.get("celular")),
-        clean_value(row.get("archivo_origen")),
-        clean_value(row.get("fila_excel")),
+        clean_text(record.get("archivo_origen")),
+        clean_text(record.get("hoja_origen")),
+        clean_text(record.get("fila_excel")),
+        clean_text(record.get("link_maps")),
+        clean_text(record.get("responsable")),
+        clean_text(record.get("distrito_local")),
+        clean_text(record.get("seccion")),
+        clean_text(record.get("direccion")),
     ]
-    raw = "||".join(parts).lower()
-    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    return "|".join(parts).lower()
 
 
-def insert_lona(row: Dict[str, object]) -> Tuple[bool, Optional[int]]:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data = {col: row.get(col, "") for col in BASE_COLUMNS if col not in ["id"]}
-    data["fecha_carga"] = data.get("fecha_carga") or now
-    data["estatus"] = data.get("estatus") or "Pendiente"
-    data["estado_coordenada"] = data.get("estado_coordenada") or "pendiente"
-    data["fuente_coordenada"] = data.get("fuente_coordenada") or "pendiente"
-    data["registro_hash"] = data.get("registro_hash") or build_hash(data)
+def insert_lona(record: dict) -> Tuple[Optional[int], bool]:
+    record = dict(record)
+    record["unique_key"] = create_unique_key(record)
+    record.setdefault("estatus", "Pendiente")
+    record.setdefault("fecha_carga", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    record.setdefault("usuario_carga", st.session_state.get("auth_user", ""))
 
-    numeric_cols = ["fila_excel", "lonas_colocadas", "latitud", "longitud", "latitud_corregida", "longitud_corregida"]
-    for col in numeric_cols:
-        if col in ["fila_excel"]:
-            try:
-                data[col] = int(float(data[col])) if clean_value(data[col]) else None
-            except Exception:
-                data[col] = None
-        else:
-            data[col] = to_float(data[col])
+    cols = [
+        "unique_key",
+        "archivo_origen",
+        "hoja_origen",
+        "fila_excel",
+        "fecha",
+        "responsable",
+        "municipio",
+        "distrito_local",
+        "seccion",
+        "colonia",
+        "direccion",
+        "ciudad_comunidad",
+        "nombre_enlace",
+        "celular",
+        "link_maps",
+        "url_expandida",
+        "lonas_colocadas",
+        "fotografia",
+        "observaciones",
+        "latitud",
+        "longitud",
+        "fuente_coordenada",
+        "estado_coordenada",
+        "estatus",
+        "supervisor",
+        "nota_supervision",
+        "fecha_revision",
+        "fecha_carga",
+        "usuario_carga",
+        "evidencia_rutas",
+    ]
 
-    cols = list(data.keys())
-    placeholders = ",".join(["?"] * len(cols))
-    sql = f"INSERT OR IGNORE INTO lonas ({','.join(cols)}) VALUES ({placeholders})"
+    values = [record.get(c) for c in cols]
 
     with get_conn() as conn:
-        cur = conn.execute(sql, [data[c] for c in cols])
+        placeholders = ",".join(["?"] * len(cols))
+        sql = f"INSERT OR IGNORE INTO lonas ({','.join(cols)}) VALUES ({placeholders})"
+        cur = conn.execute(sql, values)
         conn.commit()
-        if cur.rowcount == 1:
-            return True, int(cur.lastrowid)
 
-        existing = conn.execute("SELECT id FROM lonas WHERE registro_hash = ?", (data["registro_hash"],)).fetchone()
-        return False, int(existing["id"]) if existing else None
+        inserted = cur.rowcount == 1
+
+        row = conn.execute(
+            "SELECT id FROM lonas WHERE unique_key = ?",
+            (record["unique_key"],),
+        ).fetchone()
+
+        return (int(row["id"]) if row else None), inserted
 
 
-def update_upload_log(
-    archivo: str,
-    registros_leidos: int,
-    registros_insertados: int,
-    duplicados: int,
-    registros_mapeables: int,
-    registros_pendientes: int,
-    resolver_links: bool,
+def update_lona_review(
+    lona_id: int,
+    estatus: str,
+    supervisor: str,
+    nota: str,
+    latitud: Optional[float],
+    longitud: Optional[float],
+    fuente: str = "captura_manual",
 ) -> None:
+    estado = "exacta" if latitud is not None and longitud is not None else "pendiente"
+
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO uploads
-            (archivo, registros_leidos, registros_insertados, duplicados, registros_mapeables,
-             registros_pendientes, resolver_links, fecha_carga)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            UPDATE lonas
+            SET estatus = ?,
+                supervisor = ?,
+                nota_supervision = ?,
+                latitud = COALESCE(?, latitud),
+                longitud = COALESCE(?, longitud),
+                fuente_coordenada = CASE WHEN ? IS NOT NULL AND ? IS NOT NULL THEN ? ELSE fuente_coordenada END,
+                estado_coordenada = CASE WHEN ? IS NOT NULL AND ? IS NOT NULL THEN ? ELSE estado_coordenada END,
+                fecha_revision = ?
+            WHERE id = ?
             """,
             (
-                archivo,
-                registros_leidos,
-                registros_insertados,
-                duplicados,
-                registros_mapeables,
-                registros_pendientes,
-                1 if resolver_links else 0,
+                estatus,
+                supervisor,
+                nota,
+                latitud,
+                longitud,
+                latitud,
+                longitud,
+                fuente,
+                latitud,
+                longitud,
+                estado,
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                lona_id,
             ),
         )
         conn.commit()
 
 
-@st.cache_data(show_spinner=False)
-def load_csv(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        return pd.DataFrame()
-    return pd.read_csv(path, dtype=str, encoding="utf-8-sig").fillna("")
-
-
-def migrate_initial_csvs_if_needed() -> None:
-    if db_count_lonas() > 0:
-        return
-
-    mapeables = load_csv(MAPEABLES_CSV)
-    pendientes = load_csv(PENDIENTES_CSV)
-
-    inserted = 0
-    duplicates = 0
-
-    if not mapeables.empty:
-        for _, r in mapeables.iterrows():
-            lat = to_float(r.get("latitud"))
-            lon = to_float(r.get("longitud"))
-            row = {
-                "archivo_origen": "carga_inicial_csv_mapeables",
-                "fila_excel": r.get("fila_excel"),
-                "fecha": r.get("fecha", ""),
-                "responsable": r.get("responsable", ""),
-                "municipio": r.get("municipio", ""),
-                "distrito_local": r.get("distrito_local", r.get("distrito", "")),
-                "seccion": r.get("seccion", ""),
-                "colonia": r.get("colonia", ""),
-                "direccion": r.get("direccion", ""),
-                "ciudad_comunidad": r.get("ciudad_comunidad", ""),
-                "nombre_enlace": r.get("nombre_enlace", ""),
-                "celular": r.get("celular", ""),
-                "link_maps": r.get("link_maps", r.get("link_google_maps", "")),
-                "lonas_colocadas": r.get("lonas_colocadas", 1),
-                "fotografia": r.get("fotografia", r.get("evidencia", "")),
-                "observaciones": r.get("observaciones", ""),
-                "latitud": lat,
-                "longitud": lon,
-                "fuente_coordenada": "csv_inicial",
-                "estado_coordenada": "exacta" if lat is not None and lon is not None else "pendiente",
-                "estatus": "Pendiente",
-            }
-            ok, _ = insert_lona(row)
-            inserted += int(ok)
-            duplicates += int(not ok)
-
-    if not pendientes.empty:
-        for _, r in pendientes.iterrows():
-            row = {
-                "archivo_origen": "carga_inicial_csv_pendientes",
-                "fila_excel": r.get("fila_excel"),
-                "fecha": r.get("fecha", ""),
-                "responsable": r.get("responsable", ""),
-                "municipio": r.get("municipio", ""),
-                "distrito_local": r.get("distrito_local", r.get("distrito", "")),
-                "seccion": r.get("seccion", ""),
-                "colonia": r.get("colonia", ""),
-                "direccion": r.get("direccion", ""),
-                "ciudad_comunidad": r.get("ciudad_comunidad", ""),
-                "nombre_enlace": r.get("nombre_enlace", ""),
-                "celular": r.get("celular", ""),
-                "link_maps": r.get("link_maps", r.get("link_google_maps", "")),
-                "lonas_colocadas": r.get("lonas_colocadas", 1),
-                "fotografia": r.get("fotografia", r.get("evidencia", "")),
-                "observaciones": r.get("observaciones", ""),
-                "fuente_coordenada": "pendiente_csv_inicial",
-                "estado_coordenada": "pendiente",
-                "estatus": "Pendiente",
-            }
-            ok, _ = insert_lona(row)
-            inserted += int(ok)
-            duplicates += int(not ok)
-
-    if inserted or duplicates:
-        update_upload_log(
-            archivo="migracion_inicial_csv",
-            registros_leidos=len(mapeables) + len(pendientes),
-            registros_insertados=inserted,
-            duplicados=duplicates,
-            registros_mapeables=int(db_count_mapeables()),
-            registros_pendientes=int(db_count_pendientes()),
-            resolver_links=False,
+def update_lona_coords(
+    lona_id: int,
+    latitud: float,
+    longitud: float,
+    fuente: str,
+    estado: str,
+    url_expandida: str = "",
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE lonas
+            SET latitud = ?,
+                longitud = ?,
+                fuente_coordenada = ?,
+                estado_coordenada = ?,
+                url_expandida = COALESCE(NULLIF(?, ''), url_expandida),
+                fecha_revision = ?
+            WHERE id = ?
+            """,
+            (
+                latitud,
+                longitud,
+                fuente,
+                estado,
+                url_expandida,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                lona_id,
+            ),
         )
+        conn.commit()
 
 
-def db_count_mapeables() -> int:
+def update_lona_expanded_url(lona_id: int, expanded_url: str) -> None:
     with get_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS n FROM lonas
-            WHERE COALESCE(latitud_corregida, latitud) IS NOT NULL
-              AND COALESCE(longitud_corregida, longitud) IS NOT NULL
-            """
-        ).fetchone()
-        return int(row["n"] or 0)
-
-
-def db_count_pendientes() -> int:
-    with get_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS n FROM lonas
-            WHERE COALESCE(latitud_corregida, latitud) IS NULL
-               OR COALESCE(longitud_corregida, longitud) IS NULL
-            """
-        ).fetchone()
-        return int(row["n"] or 0)
+        conn.execute(
+            "UPDATE lonas SET url_expandida = ? WHERE id = ?",
+            (expanded_url, lona_id),
+        )
+        conn.commit()
 
 
 def load_lonas_df() -> pd.DataFrame:
@@ -648,529 +811,561 @@ def load_lonas_df() -> pd.DataFrame:
     if df.empty:
         return df
 
-    for col in ["latitud", "longitud", "latitud_corregida", "longitud_corregida", "lonas_colocadas"]:
+    for col in ["latitud", "longitud", "lonas_colocadas"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["latitud_mapa"] = df["latitud_corregida"].combine_first(df["latitud"])
-    df["longitud_mapa"] = df["longitud_corregida"].combine_first(df["longitud"])
+    df["latitud_mapa"] = df["latitud"]
+    df["longitud_mapa"] = df["longitud"]
     df["estatus"] = df["estatus"].fillna("Pendiente").replace("", "Pendiente")
-    df["distrito_local"] = df["distrito_local"].fillna("").astype(str)
-    df["seccion"] = df["seccion"].fillna("").astype(str)
+
     return df
 
 
-def load_uploads_df() -> pd.DataFrame:
-    with get_conn() as conn:
-        return pd.read_sql_query("SELECT * FROM uploads ORDER BY id DESC", conn)
+def seed_from_csv_if_empty() -> None:
+    if db_count() > 0:
+        return
+
+    if MAPEABLES_CSV.exists():
+        df_seed = pd.read_csv(MAPEABLES_CSV, dtype=str, encoding="utf-8-sig").fillna("")
+
+        for _, row in df_seed.iterrows():
+            lat = to_float(row.get("latitud"))
+            lon = to_float(row.get("longitud"))
+
+            record = {
+                "archivo_origen": "base_inicial_csv",
+                "hoja_origen": "mapeables",
+                "fila_excel": int(to_float(row.get("fila_excel")) or 0),
+                "fecha": clean_text(row.get("fecha")),
+                "responsable": clean_text(row.get("responsable")),
+                "municipio": clean_text(row.get("municipio")),
+                "distrito_local": clean_text(row.get("distrito_local")),
+                "seccion": clean_text(row.get("seccion")),
+                "colonia": clean_text(row.get("colonia")),
+                "direccion": clean_text(row.get("direccion")),
+                "ciudad_comunidad": clean_text(row.get("ciudad_comunidad")),
+                "nombre_enlace": clean_text(row.get("nombre_enlace")),
+                "celular": clean_text(row.get("celular")),
+                "link_maps": clean_text(row.get("link_maps")),
+                "url_expandida": clean_text(row.get("link_maps")),
+                "lonas_colocadas": to_float(row.get("lonas_colocadas")),
+                "fotografia": clean_text(row.get("fotografia")),
+                "observaciones": clean_text(row.get("observaciones")),
+                "latitud": lat,
+                "longitud": lon,
+                "fuente_coordenada": "base_inicial",
+                "estado_coordenada": "exacta" if lat is not None and lon is not None else "pendiente",
+                "estatus": "Pendiente",
+                "supervisor": "",
+                "nota_supervision": "",
+                "fecha_revision": "",
+                "evidencia_rutas": "",
+            }
+
+            insert_lona(record)
+
+    if PENDIENTES_CSV.exists():
+        df_p = pd.read_csv(PENDIENTES_CSV, dtype=str, encoding="utf-8-sig").fillna("")
+
+        for _, row in df_p.iterrows():
+            record = {
+                "archivo_origen": "base_inicial_csv",
+                "hoja_origen": "pendientes",
+                "fila_excel": int(to_float(row.get("fila_excel")) or 0),
+                "fecha": clean_text(row.get("fecha")),
+                "responsable": clean_text(row.get("responsable")),
+                "municipio": clean_text(row.get("municipio")),
+                "distrito_local": clean_text(row.get("distrito_local")),
+                "seccion": clean_text(row.get("seccion")),
+                "colonia": clean_text(row.get("colonia")),
+                "direccion": clean_text(row.get("direccion")),
+                "ciudad_comunidad": clean_text(row.get("ciudad_comunidad")),
+                "nombre_enlace": clean_text(row.get("nombre_enlace")),
+                "celular": clean_text(row.get("celular")),
+                "link_maps": clean_text(row.get("link_maps")),
+                "url_expandida": "",
+                "lonas_colocadas": to_float(row.get("lonas_colocadas")),
+                "fotografia": clean_text(row.get("fotografia")),
+                "observaciones": clean_text(row.get("observaciones")),
+                "latitud": None,
+                "longitud": None,
+                "fuente_coordenada": "link_no_resuelto",
+                "estado_coordenada": "pendiente",
+                "estatus": "Pendiente",
+                "supervisor": "",
+                "nota_supervision": "",
+                "fecha_revision": "",
+                "evidencia_rutas": "",
+            }
+
+            insert_lona(record)
 
 
-# -----------------------------
-# Coordenadas y Google Maps
-# -----------------------------
+# =========================================================
+# GOOGLE MAPS / COORDENADAS
+# =========================================================
+
 def extract_coords_from_google_url(url: str) -> Tuple[Optional[float], Optional[float]]:
     if not url:
         return None, None
 
     decoded = unquote(str(url))
-    decoded = decoded.replace("%2C", ",")
 
     patterns = [
         r"@(-?\d+\.\d+),(-?\d+\.\d+)",
         r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)",
         r"[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)",
         r"[?&]ll=(-?\d+\.\d+),(-?\d+\.\d+)",
-        r"[?&]center=(-?\d+\.\d+),(-?\d+\.\d+)",
         r"query=(-?\d+\.\d+),(-?\d+\.\d+)",
         r"destination=(-?\d+\.\d+),(-?\d+\.\d+)",
-        r"daddr=(-?\d+\.\d+),(-?\d+\.\d+)",
     ]
 
     for pattern in patterns:
         match = re.search(pattern, decoded)
+
         if match:
             lat = float(match.group(1))
             lon = float(match.group(2))
+
             if -90 <= lat <= 90 and -180 <= lon <= 180:
                 return lat, lon
 
     return None, None
 
 
-def expand_google_maps_url(url: str, timeout: int = 12) -> str:
-    original_url = clean_value(url)
-    if not original_url:
+def expand_google_maps_url(url: str) -> str:
+    url = clean_text(url)
+
+    if not url:
         return ""
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        )
-    }
-
     try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0 Safari/537.36"
+            )
+        }
+
         response = requests.get(
-            original_url,
+            url,
             headers=headers,
             allow_redirects=True,
-            timeout=timeout,
+            timeout=12,
         )
-        final_url = response.url or original_url
 
-        # Algunos links de Google esconden la URL larga dentro del HTML.
-        text = response.text[:200000] if response.text else ""
-        candidates = re.findall(r"https://www\.google\.com/maps[^'\"\\]+", text)
-        if candidates:
-            final_url = unquote(candidates[0])
+        return response.url or url
 
-        return final_url
     except Exception:
-        return original_url
+        return url
 
 
-def resolve_maps_link(url: str, expand_short: bool = False) -> Dict[str, object]:
-    original_url = clean_value(url)
+def resolve_maps_link(url: str, try_expand: bool = True) -> dict:
+    original_url = clean_text(url)
+
     if not original_url:
         return {
             "latitud": None,
             "longitud": None,
-            "url_maps_expandida": "",
+            "url_expandida": "",
             "fuente_coordenada": "sin_link",
             "estado_coordenada": "pendiente",
         }
 
     lat, lon = extract_coords_from_google_url(original_url)
+
     if lat is not None and lon is not None:
         return {
             "latitud": lat,
             "longitud": lon,
-            "url_maps_expandida": original_url,
+            "url_expandida": original_url,
             "fuente_coordenada": "link_directo",
             "estado_coordenada": "exacta",
         }
 
-    expanded = original_url
-    if expand_short:
-        expanded = expand_google_maps_url(original_url)
-        lat, lon = extract_coords_from_google_url(expanded)
-        if lat is not None and lon is not None:
-            return {
-                "latitud": lat,
-                "longitud": lon,
-                "url_maps_expandida": expanded,
-                "fuente_coordenada": "link_corto_resuelto",
-                "estado_coordenada": "exacta",
-            }
+    if not try_expand:
+        return {
+            "latitud": None,
+            "longitud": None,
+            "url_expandida": "",
+            "fuente_coordenada": "link_no_resuelto",
+            "estado_coordenada": "pendiente",
+        }
+
+    expanded = expand_google_maps_url(original_url)
+    lat, lon = extract_coords_from_google_url(expanded)
+
+    if lat is not None and lon is not None:
+        return {
+            "latitud": lat,
+            "longitud": lon,
+            "url_expandida": expanded,
+            "fuente_coordenada": "link_corto_resuelto",
+            "estado_coordenada": "exacta",
+        }
 
     return {
         "latitud": None,
         "longitud": None,
-        "url_maps_expandida": expanded,
-        "fuente_coordenada": "link_no_resuelto" if original_url else "sin_link",
+        "url_expandida": expanded,
+        "fuente_coordenada": "link_no_resuelto",
         "estado_coordenada": "pendiente",
     }
 
 
-def resolve_pending_links(max_items: int = 50, sleep_sec: float = 0.15) -> Dict[str, int]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, link_maps FROM lonas
-            WHERE (latitud IS NULL OR longitud IS NULL)
-              AND COALESCE(link_maps, '') <> ''
-            ORDER BY id ASC
-            LIMIT ?
-            """,
-            (int(max_items),),
-        ).fetchall()
+# =========================================================
+# LECTURA DE EXCEL
+# =========================================================
 
-    stats = {"procesados": 0, "resueltos": 0, "pendientes": 0}
-    progress = st.progress(0) if rows else None
+def detect_header_row(raw: pd.DataFrame) -> Optional[int]:
+    max_scan = min(len(raw), 15)
 
-    for i, row in enumerate(rows, start=1):
-        result = resolve_maps_link(row["link_maps"], expand_short=True)
-        with get_conn() as conn:
-            conn.execute(
-                """
-                UPDATE lonas
-                SET latitud = ?, longitud = ?, url_maps_expandida = ?,
-                    fuente_coordenada = ?, estado_coordenada = ?
-                WHERE id = ?
-                """,
-                (
-                    result["latitud"],
-                    result["longitud"],
-                    result["url_maps_expandida"],
-                    result["fuente_coordenada"],
-                    result["estado_coordenada"],
-                    row["id"],
-                ),
-            )
-            conn.commit()
+    for i in range(max_scan):
+        row_values = [normalize_header(x) for x in raw.iloc[i].tolist()]
+        joined = " | ".join(row_values)
 
-        stats["procesados"] += 1
-        if result["latitud"] is not None and result["longitud"] is not None:
-            stats["resueltos"] += 1
-        else:
-            stats["pendientes"] += 1
+        keywords = [
+            "fecha",
+            "responsable",
+            "municipio",
+            "distrito",
+            "seccion",
+            "colonia",
+            "direccion",
+            "link",
+            "maps",
+            "lona",
+            "observacion",
+        ]
 
-        if progress is not None:
-            progress.progress(i / len(rows))
-        time.sleep(sleep_sec)
+        score = sum(1 for kw in keywords if kw in joined)
 
-    return stats
+        if score >= 4 and "fecha" in joined:
+            return i
 
-
-# -----------------------------
-# Lectura de Excel flexible
-# -----------------------------
-def normalize_col_name(name: object) -> str:
-    text = clean_value(name).lower()
-    text = text.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
-    text = text.replace("ñ", "n")
-    text = re.sub(r"\s+", " ", text)
-    text = text.strip()
-    return text
-
-
-def canonical_col(name: object) -> Optional[str]:
-    n = normalize_col_name(name)
-    if not n:
-        return None
-
-    if n in ["fecha", "fecha de captura", "fecha captura"]:
-        return "fecha"
-    if "responsable" in n:
-        return "responsable"
-    if "municipio" in n:
-        return "municipio"
-    if "distrito" in n:
-        return "distrito_local"
-    if n in ["seccion", "seccion electoral", "secciones"] or "seccion" in n:
-        return "seccion"
-    if "colonia" in n:
-        return "colonia"
-    if "direccion" in n or "ubicacion" in n or "domicilio" in n:
-        return "direccion"
-    if ("google" in n and "map" in n) or n in ["link", "link maps", "maps", "google maps"]:
-        return "link_maps"
-    if "lona" in n and ("coloc" in n or "cantidad" in n or "total" in n):
-        return "lonas_colocadas"
-    if n == "lonas" or n == "lona":
-        return "lonas_colocadas"
-    if "foto" in n or "fotografia" in n or "evidencia" in n:
-        return "fotografia"
-    if "observ" in n:
-        return "observaciones"
-    if "ciudad" in n or "comunidad" in n:
-        return "ciudad_comunidad"
-    if "nombre" in n and ("enlace" in n or "vecino" in n or "contacto" in n):
-        return "nombre_enlace"
-    if n in ["enlace", "nombre enlace", "nombre del enlace"]:
-        return "nombre_enlace"
-    if "cel" in n or "telefono" in n or "whatsapp" in n:
-        return "celular"
-    if n in ["lat", "latitude", "latitud"]:
-        return "latitud"
-    if n in ["lon", "lng", "longitude", "longitud"]:
-        return "longitud"
     return None
 
 
-def find_header_row(raw_df: pd.DataFrame) -> int:
-    best_idx = 0
-    best_score = -1
-    max_scan = min(25, len(raw_df))
-
-    required_weights = {
-        "fecha": 1,
-        "responsable": 1,
-        "municipio": 1,
-        "distrito_local": 2,
-        "seccion": 2,
-        "colonia": 1,
-        "direccion": 2,
-        "link_maps": 3,
-        "lonas_colocadas": 1,
-        "observaciones": 1,
+def build_column_groups(columns: List[str]) -> Dict[str, List[str]]:
+    groups = {
+        "fecha": [],
+        "responsable": [],
+        "municipio": [],
+        "distrito_local": [],
+        "seccion": [],
+        "colonia": [],
+        "direccion": [],
+        "ciudad_comunidad": [],
+        "nombre_enlace": [],
+        "celular": [],
+        "link_maps": [],
+        "lonas_colocadas": [],
+        "fotografia": [],
+        "observaciones": [],
     }
 
-    for idx in range(max_scan):
-        row = raw_df.iloc[idx].tolist()
-        found = set()
-        for value in row:
-            canon = canonical_col(value)
-            if canon:
-                found.add(canon)
-        score = sum(required_weights.get(c, 1) for c in found)
-        if score > best_score:
-            best_score = score
-            best_idx = idx
+    for col in columns:
+        norm = normalize_header(col)
 
-    return best_idx
+        if "fecha" in norm:
+            groups["fecha"].append(col)
+        elif "responsable" in norm:
+            groups["responsable"].append(col)
+        elif "municipio" in norm:
+            groups["municipio"].append(col)
+        elif "distrito" in norm:
+            groups["distrito_local"].append(col)
+        elif "seccion" in norm:
+            groups["seccion"].append(col)
+        elif "colonia" in norm:
+            groups["colonia"].append(col)
+        elif "direccion" in norm:
+            groups["direccion"].append(col)
+        elif "ciudad" in norm or "comunidad" in norm:
+            groups["ciudad_comunidad"].append(col)
+        elif "enlace" in norm and "link" not in norm:
+            groups["nombre_enlace"].append(col)
+        elif "celular" in norm or "telefono" in norm:
+            groups["celular"].append(col)
+        elif "link" in norm or "maps" in norm or "mapa" in norm or "ubicacion" in norm:
+            groups["link_maps"].append(col)
+        elif "lona" in norm and ("colocada" in norm or "colocadas" in norm or "cantidad" in norm):
+            groups["lonas_colocadas"].append(col)
+        elif "foto" in norm or "fotografia" in norm or "evidencia" in norm:
+            groups["fotografia"].append(col)
+        elif "observacion" in norm or "comentario" in norm:
+            groups["observaciones"].append(col)
 
-
-
-
-def build_unique_import_headers(headers: List[object]) -> List[str]:
-    """
-    Convierte encabezados del Excel a nombres internos únicos.
-    Soluciona archivos con columnas duplicadas, por ejemplo CELULAR en dos secciones.
-    Regla práctica: si hay dos CELULAR, conserva el último como teléfono del enlace/contacto.
-    """
-    canon_by_index = [canonical_col(h) for h in headers]
-    keep_index_by_canon: Dict[str, int] = {}
-
-    for idx, canon in enumerate(canon_by_index):
-        if not canon:
-            continue
-
-        if canon not in keep_index_by_canon:
-            keep_index_by_canon[canon] = idx
-        else:
-            # En este formato existe CELULAR del responsable y CELULAR del enlace.
-            # Para supervisión conviene conservar el último, que suele estar junto a NOMBRE DEL ENLACE.
-            if canon == "celular":
-                keep_index_by_canon[canon] = idx
-            # Para las demás columnas repetidas, conserva la primera aparición.
-
-    out: List[str] = []
-    used_extra: Dict[str, int] = {}
-
-    for idx, raw_header in enumerate(headers):
-        canon = canon_by_index[idx]
-
-        if canon and keep_index_by_canon.get(canon) == idx:
-            out.append(canon)
-            continue
-
-        base = normalize_col_name(raw_header) or f"col_{idx + 1}"
-        base = re.sub(r"[^a-z0-9_]+", "_", base).strip("_") or f"col_{idx + 1}"
-        base = f"extra_{base[:28]}"
-        used_extra[base] = used_extra.get(base, 0) + 1
-        suffix = used_extra[base]
-        out.append(base if suffix == 1 else f"{base}_{suffix}")
-
-    # Garantía final: no permitir columnas duplicadas.
-    final: List[str] = []
-    counts: Dict[str, int] = {}
-    for name in out:
-        counts[name] = counts.get(name, 0) + 1
-        final.append(name if counts[name] == 1 else f"{name}_{counts[name]}")
-
-    return final
-
-def read_excel_records(file_bytes: bytes, filename: str, resolve_links: bool = False) -> Tuple[pd.DataFrame, Dict[int, int]]:
-    xls = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
-    # Toma la primera hoja con más contenido.
-    sheet_name = xls.sheet_names[0]
-    best_rows = -1
-    for s in xls.sheet_names:
-        preview = pd.read_excel(io.BytesIO(file_bytes), sheet_name=s, header=None, nrows=40, engine="openpyxl")
-        non_empty = int(preview.dropna(how="all").shape[0])
-        if non_empty > best_rows:
-            best_rows = non_empty
-            sheet_name = s
-
-    raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name, header=None, engine="openpyxl")
-    header_idx = find_header_row(raw)
-    headers = raw.iloc[header_idx].tolist()
-    data = raw.iloc[header_idx + 1 :].copy()
-    data.columns = build_unique_import_headers(headers)
-    data = data.dropna(how="all")
-
-    # Defensa adicional contra encabezados duplicados o celdas combinadas.
-    data = data.loc[:, ~pd.Index(data.columns).duplicated()].copy()
-
-    for col in BASE_COLUMNS:
-        if col not in data.columns and col not in ["id", "registro_hash", "fecha_carga", "estatus", "estado_coordenada", "fuente_coordenada"]:
-            data[col] = ""
-
-    keep_cols = [
-        "fecha", "responsable", "municipio", "distrito_local", "seccion", "colonia", "direccion",
-        "ciudad_comunidad", "nombre_enlace", "celular", "link_maps", "lonas_colocadas",
-        "fotografia", "observaciones", "latitud", "longitud",
-    ]
-    data = data[[c for c in keep_cols if c in data.columns]].copy()
-
-    # Limpieza básica y fila original de Excel.
-    data["archivo_origen"] = filename
-    data["fila_excel"] = [int(i + header_idx + 2) for i in range(len(data))]
-
-    # Filtra renglones sin contenido operativo.
-    meaningful_cols = ["link_maps", "direccion", "colonia", "seccion", "distrito_local", "responsable", "observaciones"]
-    mask = pd.Series(False, index=data.index)
-    for col in meaningful_cols:
-        if col in data.columns:
-            mask = mask | data[col].apply(lambda x: clean_value(x) != "")
-    data = data[mask].copy()
-
-    rows_out = []
-    excel_row_to_temp_index: Dict[int, int] = {}
-
-    progress = st.progress(0) if resolve_links and len(data) else None
-
-    for pos, (_, r) in enumerate(data.iterrows(), start=1):
-        row = {col: clean_value(r.get(col, "")) for col in data.columns}
-        excel_row = int(row.get("fila_excel") or 0)
-        link = row.get("link_maps", "")
-        lat_direct = to_float(row.get("latitud"))
-        lon_direct = to_float(row.get("longitud"))
-
-        if lat_direct is not None and lon_direct is not None:
-            coord = {
-                "latitud": lat_direct,
-                "longitud": lon_direct,
-                "url_maps_expandida": link,
-                "fuente_coordenada": "excel_lat_lon",
-                "estado_coordenada": "exacta",
-            }
-        else:
-            coord = resolve_maps_link(link, expand_short=resolve_links)
-
-        row.update(coord)
-        row["estatus"] = "Pendiente"
-        row["registro_hash"] = build_hash(row)
-        rows_out.append(row)
-        excel_row_to_temp_index[excel_row] = len(rows_out) - 1
-
-        if progress is not None:
-            progress.progress(pos / len(data))
-
-    return pd.DataFrame(rows_out), excel_row_to_temp_index
+    return groups
 
 
-def save_uploaded_excel(file_bytes: bytes, filename: str) -> Path:
-    safe_name = re.sub(r"[^A-Za-z0-9_. -]+", "_", filename).strip() or "upload.xlsx"
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = UPLOADS_DIR / f"{ts}_{safe_name}"
-    out.write_bytes(file_bytes)
-    return out
+def get_first_value(row: pd.Series, cols: List[str], prefer_last: bool = False) -> str:
+    if not cols:
+        return ""
+
+    iterable = list(reversed(cols)) if prefer_last else cols
+
+    for col in iterable:
+        if col in row.index:
+            value = clean_text(row[col])
+
+            if value:
+                return value
+
+    return ""
 
 
-def extract_images_from_excel(file_bytes: bytes, filename: str, excel_row_to_db_id: Dict[int, int]) -> int:
-    if openpyxl is None:
-        return 0
+def read_excel_images(excel_bytes: bytes, sheet_name: str) -> Dict[int, List[Tuple[bytes, str]]]:
+    images_by_row: Dict[int, List[Tuple[bytes, str]]] = {}
 
     try:
-        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    except Exception:
-        return 0
+        from openpyxl import load_workbook
 
-    total_saved = 0
+        wb = load_workbook(io.BytesIO(excel_bytes), data_only=True)
+        ws = wb[sheet_name]
 
-    for ws in wb.worksheets:
-        images = getattr(ws, "_images", [])
-        counters: Dict[int, int] = {}
-        for img in images:
+        for image in getattr(ws, "_images", []):
             try:
-                anchor = getattr(img, "anchor", None)
-                if not anchor or not hasattr(anchor, "_from"):
-                    continue
-                excel_row = int(anchor._from.row) + 1
-                db_id = excel_row_to_db_id.get(excel_row)
-                if not db_id:
-                    continue
-
-                counters[db_id] = counters.get(db_id, 0) + 1
-                img_bytes = img._data()
-                ext = (getattr(img, "format", None) or "png").lower().replace("jpeg", "jpg")
-                if ext not in ["png", "jpg", "jpeg", "webp"]:
-                    ext = "png"
-                out = IMG_DIR / f"registro_{db_id}_evidencia_{counters[db_id]}.{ext}"
-                out.write_bytes(img_bytes)
-                total_saved += 1
+                anchor_row = int(image.anchor._from.row) + 1
+                img_bytes = image._data()
+                ext = str(getattr(image, "format", "png") or "png").lower()
+                images_by_row.setdefault(anchor_row, []).append((img_bytes, ext))
             except Exception:
                 continue
 
-    return total_saved
+    except Exception:
+        return {}
+
+    return images_by_row
 
 
-def import_excel_to_db(file_bytes: bytes, filename: str, resolve_links: bool = False) -> Dict[str, int]:
-    save_uploaded_excel(file_bytes, filename)
-    parsed, _ = read_excel_records(file_bytes, filename, resolve_links=resolve_links)
+def save_images_for_lona(lona_id: int, images: List[Tuple[bytes, str]]) -> List[str]:
+    saved = []
 
-    stats = {
-        "registros_leidos": int(len(parsed)),
-        "insertados": 0,
-        "duplicados": 0,
-        "mapeables": 0,
-        "pendientes": 0,
-        "imagenes_extraidas": 0,
-    }
+    for idx, (img_bytes, ext) in enumerate(images, start=1):
+        ext = ext.lower().replace(".", "")
 
-    excel_row_to_db_id: Dict[int, int] = {}
+        if ext not in ["png", "jpg", "jpeg", "webp"]:
+            ext = "png"
 
-    for _, r in parsed.iterrows():
-        row = r.to_dict()
-        ok, db_id = insert_lona(row)
-        if ok:
-            stats["insertados"] += 1
-        else:
-            stats["duplicados"] += 1
-        if db_id:
-            try:
-                excel_row_to_db_id[int(row.get("fila_excel"))] = int(db_id)
-            except Exception:
-                pass
+        path = IMG_DIR / f"db_{lona_id}_evidencia_{idx}.{ext}"
 
-        if to_float(row.get("latitud")) is not None and to_float(row.get("longitud")) is not None:
-            stats["mapeables"] += 1
-        else:
-            stats["pendientes"] += 1
+        try:
+            path.write_bytes(img_bytes)
+            saved.append(str(path.relative_to(APP_DIR)))
+        except Exception:
+            continue
 
-    stats["imagenes_extraidas"] = extract_images_from_excel(file_bytes, filename, excel_row_to_db_id)
+    if saved:
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE lonas SET evidencia_rutas = ? WHERE id = ?",
+                (json.dumps(saved, ensure_ascii=False), lona_id),
+            )
+            conn.commit()
 
-    update_upload_log(
-        archivo=filename,
-        registros_leidos=stats["registros_leidos"],
-        registros_insertados=stats["insertados"],
-        duplicados=stats["duplicados"],
-        registros_mapeables=stats["mapeables"],
-        registros_pendientes=stats["pendientes"],
-        resolver_links=resolve_links,
-    )
-
-    return stats
+    return saved
 
 
-# -----------------------------
-# Mapas, popups y exportaciones
-# -----------------------------
-def image_files_for_record(record_id: int, fila_excel: Optional[int] = None) -> List[Path]:
-    files = sorted([p for p in IMG_DIR.glob(f"registro_{int(record_id)}_evidencia_*.*") if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]])
-    if files:
-        return files
+def parse_excel_file(uploaded_file, resolve_short_links: bool) -> Tuple[int, int, int, int, int]:
+    excel_bytes = uploaded_file.getvalue()
+    archivo_origen = uploaded_file.name
 
-    # Compatibilidad con evidencias del primer paquete, nombradas por fila Excel.
-    if fila_excel is not None and not pd.isna(fila_excel):
-        return sorted([p for p in IMG_DIR.glob(f"fila_{int(fila_excel)}_evidencia_*.*") if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]])
+    uploaded_copy = UPLOADS_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{archivo_origen}"
+    uploaded_copy.write_bytes(excel_bytes)
 
-    return []
+    total_records = 0
+    inserted = 0
+    duplicated = 0
+    mapeables = 0
+    pendientes = 0
+
+    xls = pd.ExcelFile(io.BytesIO(excel_bytes))
+
+    for sheet_name in xls.sheet_names:
+        raw = pd.read_excel(
+            io.BytesIO(excel_bytes),
+            sheet_name=sheet_name,
+            header=None,
+            dtype=str,
+        ).fillna("")
+
+        header_idx = detect_header_row(raw)
+
+        if header_idx is None:
+            continue
+
+        headers = make_unique_headers(raw.iloc[header_idx].tolist())
+        data = raw.iloc[header_idx + 1:].copy()
+        data.columns = headers
+
+        groups = build_column_groups(headers)
+        images_by_row = read_excel_images(excel_bytes, sheet_name)
+
+        for raw_idx, row in data.iterrows():
+            excel_row_number = int(raw_idx) + 1
+
+            record = {
+                "archivo_origen": archivo_origen,
+                "hoja_origen": sheet_name,
+                "fila_excel": excel_row_number,
+                "fecha": get_first_value(row, groups["fecha"]),
+                "responsable": get_first_value(row, groups["responsable"]),
+                "municipio": get_first_value(row, groups["municipio"]),
+                "distrito_local": get_first_value(row, groups["distrito_local"]),
+                "seccion": get_first_value(row, groups["seccion"]),
+                "colonia": get_first_value(row, groups["colonia"]),
+                "direccion": get_first_value(row, groups["direccion"]),
+                "ciudad_comunidad": get_first_value(row, groups["ciudad_comunidad"]),
+                "nombre_enlace": get_first_value(row, groups["nombre_enlace"]),
+                "celular": get_first_value(row, groups["celular"], prefer_last=True),
+                "link_maps": get_first_value(row, groups["link_maps"]),
+                "lonas_colocadas": to_float(get_first_value(row, groups["lonas_colocadas"])) or 1,
+                "fotografia": get_first_value(row, groups["fotografia"]),
+                "observaciones": get_first_value(row, groups["observaciones"]),
+                "estatus": "Pendiente",
+                "supervisor": "",
+                "nota_supervision": "",
+                "fecha_revision": "",
+                "fecha_carga": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "usuario_carga": st.session_state.get("auth_user", ""),
+                "evidencia_rutas": "",
+            }
+
+            meaningful = [
+                record["fecha"],
+                record["responsable"],
+                record["municipio"],
+                record["distrito_local"],
+                record["seccion"],
+                record["colonia"],
+                record["direccion"],
+                record["link_maps"],
+                record["observaciones"],
+            ]
+
+            if not any(clean_text(x) for x in meaningful):
+                continue
+
+            coord = resolve_maps_link(record["link_maps"], try_expand=resolve_short_links)
+            record.update(coord)
+
+            total_records += 1
+
+            if record.get("latitud") is not None and record.get("longitud") is not None:
+                mapeables += 1
+            else:
+                pendientes += 1
+
+            lona_id, was_inserted = insert_lona(record)
+
+            if was_inserted:
+                inserted += 1
+
+                if lona_id and excel_row_number in images_by_row:
+                    save_images_for_lona(lona_id, images_by_row[excel_row_number])
+            else:
+                duplicated += 1
+
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO uploads (
+                archivo,
+                registros_leidos,
+                registros_insertados,
+                registros_duplicados,
+                registros_mapeables,
+                registros_pendientes,
+                fecha_carga,
+                usuario_carga
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                archivo_origen,
+                total_records,
+                inserted,
+                duplicated,
+                mapeables,
+                pendientes,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                st.session_state.get("auth_user", ""),
+            ),
+        )
+        conn.commit()
+
+    return total_records, inserted, duplicated, mapeables, pendientes
+
+
+# =========================================================
+# IMÁGENES / MAPAS / EXPORTACIONES
+# =========================================================
+
+def image_files_for_lona(row: pd.Series) -> List[Path]:
+    files: List[Path] = []
+
+    evidencia_rutas = clean_text(row.get("evidencia_rutas", ""))
+
+    if evidencia_rutas:
+        try:
+            rutas = json.loads(evidencia_rutas)
+
+            for ruta in rutas:
+                path = APP_DIR / ruta
+
+                if path.exists():
+                    files.append(path)
+        except Exception:
+            pass
+
+    lona_id = row.get("id")
+
+    if pd.notna(lona_id):
+        files.extend(sorted(IMG_DIR.glob(f"db_{int(lona_id)}_evidencia_*.*")))
+
+    fila_excel = row.get("fila_excel")
+
+    if pd.notna(fila_excel):
+        files.extend(sorted(IMG_DIR.glob(f"fila_{int(fila_excel)}_evidencia_*.*")))
+
+    unique = []
+    seen = set()
+
+    for f in files:
+        if f.exists() and str(f) not in seen:
+            unique.append(f)
+            seen.add(str(f))
+
+    return unique
 
 
 def img_to_base64(path: Path) -> Optional[str]:
     try:
         data = path.read_bytes()
         ext = path.suffix.lower().lstrip(".") or "jpg"
+
         if ext == "jpg":
             ext = "jpeg"
+
         return f"data:image/{ext};base64," + base64.b64encode(data).decode("ascii")
+
     except Exception:
         return None
 
 
 def make_popup_html(row: pd.Series, include_img: bool = True) -> str:
-    record_id = int(row["id"])
-    fila_excel = row.get("fila_excel", "")
+    lona_id = int(row.get("id", 0))
     img_html = ""
 
     if include_img:
-        imgs = image_files_for_record(record_id, fila_excel)
+        imgs = image_files_for_lona(row)
+
         if imgs:
             src = img_to_base64(imgs[0])
+
             if src:
                 img_html = f"""
                 <div style='margin-top:10px'>
@@ -1178,33 +1373,40 @@ def make_popup_html(row: pd.Series, include_img: bool = True) -> str:
                 </div>
                 """
 
-    maps_link = html.escape(str(row.get("link_maps", "") or ""))
-    link_html = f"<a href='{maps_link}' target='_blank' style='color:{MORENA_GUINDA};font-weight:bold'>Abrir en Google Maps</a>" if maps_link else ""
-    status = html.escape(str(row.get("estatus", "Pendiente") or "Pendiente"))
-    status_color = STATUS_COLORS.get(str(row.get("estatus", "Pendiente") or "Pendiente"), MORENA_GUINDA)
-    fuente = html.escape(str(row.get("fuente_coordenada", "") or ""))
+    maps_link = html.escape(clean_text(row.get("link_maps", "")))
 
-    return f"""
-    <div style='font-family:Arial; width:295px; color:#272124'>
-      <h4 style='margin:0 0 8px 0; color:{MORENA_GUINDA_DARK}'>Lona | ID {record_id}</h4>
+    link_html = (
+        f"<a href='{maps_link}' target='_blank' style='color:{MORENA_GUINDA};font-weight:bold'>Abrir en Google Maps</a>"
+        if maps_link
+        else ""
+    )
+
+    status = html.escape(clean_text(row.get("estatus", "Pendiente")) or "Pendiente")
+    status_color = STATUS_COLORS.get(status, MORENA_GUINDA)
+
+    body = f"""
+    <div style='font-family:Arial; width:300px; color:#272124'>
+      <h4 style='margin:0 0 8px 0; color:{MORENA_GUINDA_DARK}'>Lona | ID {lona_id}</h4>
       <div style='display:inline-block;background:{status_color};color:white;padding:4px 9px;border-radius:999px;font-size:12px;font-weight:bold;margin-bottom:8px'>{status}</div><br>
-      <b>Archivo:</b> {html.escape(str(row.get('archivo_origen','')))}<br>
-      <b>Fila Excel:</b> {html.escape(str(fila_excel))}<br>
-      <b>Distrito:</b> {html.escape(str(row.get('distrito_local','')))} &nbsp; <b>Sección:</b> {html.escape(str(row.get('seccion','')))}<br>
-      <b>Colonia:</b> {html.escape(str(row.get('colonia','')))}<br>
-      <b>Dirección:</b> {html.escape(str(row.get('direccion','')))}<br>
-      <b>Fuente coordenada:</b> {fuente}<br>
-      <b>Observaciones:</b> {html.escape(str(row.get('observaciones','')))}<br>
-      <b>Supervisor:</b> {html.escape(str(row.get('supervisor','')))}<br>
-      <b>Nota:</b> {html.escape(str(row.get('nota_supervision','')))}<br>
+      <b>Distrito:</b> {html.escape(clean_text(row.get('distrito_local','')))} &nbsp; <b>Sección:</b> {html.escape(clean_text(row.get('seccion','')))}<br>
+      <b>Colonia:</b> {html.escape(clean_text(row.get('colonia','')))}<br>
+      <b>Dirección:</b> {html.escape(clean_text(row.get('direccion','')))}<br>
+      <b>Responsable:</b> {html.escape(clean_text(row.get('responsable','')))}<br>
+      <b>Observaciones:</b> {html.escape(clean_text(row.get('observaciones','')))}<br>
+      <b>Supervisor:</b> {html.escape(clean_text(row.get('supervisor','')))}<br>
+      <b>Nota:</b> {html.escape(clean_text(row.get('nota_supervision','')))}<br>
+      <b>Fuente coord.:</b> {html.escape(clean_text(row.get('fuente_coordenada','')))}<br>
       {link_html}
       {img_html}
     </div>
     """
 
+    return body
+
 
 def add_tile_layers(m: folium.Map, selected_tile: str) -> None:
     selected_tile = selected_tile if selected_tile in TILE_OPTIONS else "Calles claro"
+
     for name, cfg in TILE_OPTIONS.items():
         folium.TileLayer(
             tiles=cfg["tiles"],
@@ -1216,46 +1418,57 @@ def add_tile_layers(m: folium.Map, selected_tile: str) -> None:
         ).add_to(m)
 
 
-def make_map(df: pd.DataFrame, selected_id: Optional[int] = None, selected_tile: str = "Calles claro", cluster_points: bool = False) -> folium.Map:
+def make_map(
+    df: pd.DataFrame,
+    selected_lona_id: Optional[int] = None,
+    selected_tile: str = "Calles claro",
+    cluster_points: bool = False,
+) -> folium.Map:
     valid = df.dropna(subset=["latitud_mapa", "longitud_mapa"]).copy()
 
     if valid.empty:
-        m = folium.Map(location=[25.79, -109.0], zoom_start=8, tiles=None, control_scale=True)
+        m = folium.Map(location=[25.79, -109.0], zoom_start=12, tiles=None, control_scale=True)
         add_tile_layers(m, selected_tile)
         folium.LayerControl(collapsed=False).add_to(m)
         return m
 
     center = [valid["latitud_mapa"].mean(), valid["longitud_mapa"].mean()]
     m = folium.Map(location=center, zoom_start=13, tiles=None, control_scale=True)
+
     add_tile_layers(m, selected_tile)
 
-    target_layer = MarkerCluster(name="Lonas agrupadas").add_to(m) if cluster_points else folium.FeatureGroup(name="Lonas", show=True).add_to(m)
+    if cluster_points:
+        target_layer = MarkerCluster(name="Lonas agrupadas").add_to(m)
+    else:
+        target_layer = folium.FeatureGroup(name="Lonas", show=True).add_to(m)
 
     for _, row in valid.iterrows():
-        rid = int(row["id"])
-        status = str(row.get("estatus", "Pendiente") or "Pendiente")
+        lona_id = int(row["id"])
+        status = clean_text(row.get("estatus", "Pendiente")) or "Pendiente"
         color = STATUS_COLORS.get(status, MORENA_GUINDA)
-        radius = 12 if selected_id == rid else 7
+        radius = 12 if selected_lona_id == lona_id else 7
 
         folium.CircleMarker(
             location=[float(row["latitud_mapa"]), float(row["longitud_mapa"])],
             radius=radius,
-            popup=folium.Popup(make_popup_html(row), max_width=380),
-            tooltip=f"ID {rid} | D{row.get('distrito_local','')} S{row.get('seccion','')} | {status}",
-            color="#FFFFFF" if selected_id == rid else color,
-            weight=3 if selected_id == rid else 2,
+            popup=folium.Popup(make_popup_html(row), max_width=370),
+            tooltip=f"ID {lona_id} | D{row.get('distrito_local','')} S{row.get('seccion','')} | {status}",
+            color="#FFFFFF" if selected_lona_id == lona_id else color,
+            weight=3 if selected_lona_id == lona_id else 2,
             fill=True,
             fill_color=color,
             fill_opacity=0.90,
         ).add_to(target_layer)
 
-    if selected_id:
-        sel = valid[valid["id"].astype(int) == int(selected_id)]
+    if selected_lona_id:
+        sel = valid[valid["id"].astype(int) == int(selected_lona_id)]
+
         if not sel.empty:
             row = sel.iloc[0]
+
             folium.Marker(
                 location=[float(row["latitud_mapa"]), float(row["longitud_mapa"])],
-                popup=folium.Popup(make_popup_html(row), max_width=380),
+                popup=folium.Popup(make_popup_html(row), max_width=370),
                 tooltip="Registro seleccionado",
                 icon=folium.Icon(color="darkred", icon="star"),
             ).add_to(m)
@@ -1263,10 +1476,14 @@ def make_map(df: pd.DataFrame, selected_id: Optional[int] = None, selected_tile:
     Fullscreen().add_to(m)
     MeasureControl(primary_length_unit="meters", secondary_length_unit="kilometers").add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
+
     return m
 
 
-def make_supervision_cluster_map(df: pd.DataFrame, selected_tile: str = "Satélite") -> folium.Map:
+def make_supervision_cluster_map(
+    df: pd.DataFrame,
+    selected_tile: str = "Satélite",
+) -> folium.Map:
     valid = df.dropna(subset=["latitud_mapa", "longitud_mapa"]).copy()
 
     if valid.empty:
@@ -1278,6 +1495,7 @@ def make_supervision_cluster_map(df: pd.DataFrame, selected_tile: str = "Satéli
 
     center = [valid["latitud_mapa"].mean(), valid["longitud_mapa"].mean()]
     m = folium.Map(location=center, zoom_start=8, tiles=None, control_scale=True)
+
     add_tile_layers(m, selected_tile)
 
     icon_create_function = f"""
@@ -1305,15 +1523,19 @@ def make_supervision_cluster_map(df: pd.DataFrame, selected_tile: str = "Satéli
     ).add_to(m)
 
     for _, row in valid.iterrows():
-        rid = int(row["id"])
-        status = str(row.get("estatus", "Pendiente") or "Pendiente")
+        lona_id = int(row["id"])
+        status = clean_text(row.get("estatus", "Pendiente")) or "Pendiente"
         color = STATUS_COLORS.get(status, MORENA_GUINDA)
-        tooltip = f"ID {rid} | Distrito {row.get('distrito_local','')} | Sección {row.get('seccion','')} | {status}"
+
+        tooltip = (
+            f"ID {lona_id} | Distrito {row.get('distrito_local','')} | "
+            f"Sección {row.get('seccion','')} | {status}"
+        )
 
         folium.CircleMarker(
             location=[float(row["latitud_mapa"]), float(row["longitud_mapa"])],
             radius=7,
-            popup=folium.Popup(make_popup_html(row), max_width=380),
+            popup=folium.Popup(make_popup_html(row), max_width=370),
             tooltip=tooltip,
             color="#FFFFFF",
             weight=2,
@@ -1325,6 +1547,7 @@ def make_supervision_cluster_map(df: pd.DataFrame, selected_tile: str = "Satéli
     Fullscreen().add_to(m)
     MeasureControl(primary_length_unit="meters", secondary_length_unit="kilometers").add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
+
     return m
 
 
@@ -1334,9 +1557,12 @@ def kml_escape(value: object) -> str:
 
 def hex_to_kml_color(hex_color: str, alpha: str = "ff") -> str:
     color = hex_color.lstrip("#")
+
     if len(color) != 6:
         color = "7A0026"
+
     rr, gg, bb = color[0:2], color[2:4], color[4:6]
+
     return f"{alpha}{bb}{gg}{rr}"
 
 
@@ -1357,15 +1583,24 @@ def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision"
 
     for distrito, df_d in valid.groupby(valid["distrito_local"].astype(str), dropna=False):
         kml_parts.append(f"<Folder><name>Distrito Local {kml_escape(distrito)}</name>")
+
         for seccion, df_s in df_d.groupby(df_d["seccion"].astype(str), dropna=False):
             kml_parts.append(f"<Folder><name>Sección {kml_escape(seccion)}</name>")
-            for _, row in df_s.iterrows():
-                rid = int(row["id"])
-                status = str(row.get("estatus", "Pendiente") or "Pendiente")
-                style = "verificado" if status == "Verificado" else "pendiente" if status in ["Pendiente", ""] else "alerta"
 
-                imgs = image_files_for_record(rid, row.get("fila_excel"))
+            for _, row in df_s.iterrows():
+                lona_id = int(row["id"])
+                status = clean_text(row.get("estatus", "Pendiente")) or "Pendiente"
+
+                if status == "Verificado":
+                    style = "verificado"
+                elif status in ["Pendiente", ""]:
+                    style = "pendiente"
+                else:
+                    style = "alerta"
+
+                imgs = image_files_for_lona(row)
                 img_html = ""
+
                 if imgs:
                     img_path = f"files/{imgs[0].name}"
                     img_html = f"<br/><br/><img src='{img_path}' width='420'/>"
@@ -1373,26 +1608,26 @@ def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision"
                 desc = f"""
                 <![CDATA[
                 <div style='font-family:Arial'>
-                  <h3>Lona | ID {rid}</h3>
-                  <b>Archivo origen:</b> {html.escape(str(row.get('archivo_origen','')))}<br/>
-                  <b>Fila Excel:</b> {html.escape(str(row.get('fila_excel','')))}<br/>
+                  <h3>Lona | ID {lona_id}</h3>
                   <b>Estatus:</b> {html.escape(status)}<br/>
-                  <b>Distrito Local:</b> {html.escape(str(row.get('distrito_local','')))}<br/>
-                  <b>Sección:</b> {html.escape(str(row.get('seccion','')))}<br/>
-                  <b>Municipio:</b> {html.escape(str(row.get('municipio','')))}<br/>
-                  <b>Colonia:</b> {html.escape(str(row.get('colonia','')))}<br/>
-                  <b>Dirección:</b> {html.escape(str(row.get('direccion','')))}<br/>
-                  <b>Fuente coordenada:</b> {html.escape(str(row.get('fuente_coordenada','')))}<br/>
-                  <b>Observaciones origen:</b> {html.escape(str(row.get('observaciones','')))}<br/>
-                  <b>Supervisor:</b> {html.escape(str(row.get('supervisor','')))}<br/>
-                  <b>Nota supervisión:</b> {html.escape(str(row.get('nota_supervision','')))}<br/>
-                  <b>Fecha revisión:</b> {html.escape(str(row.get('fecha_revision','')))}<br/>
+                  <b>Distrito Local:</b> {html.escape(clean_text(row.get('distrito_local','')))}<br/>
+                  <b>Sección:</b> {html.escape(clean_text(row.get('seccion','')))}<br/>
+                  <b>Municipio:</b> {html.escape(clean_text(row.get('municipio','')))}<br/>
+                  <b>Colonia:</b> {html.escape(clean_text(row.get('colonia','')))}<br/>
+                  <b>Dirección:</b> {html.escape(clean_text(row.get('direccion','')))}<br/>
+                  <b>Responsable:</b> {html.escape(clean_text(row.get('responsable','')))}<br/>
+                  <b>Observaciones:</b> {html.escape(clean_text(row.get('observaciones','')))}<br/>
+                  <b>Supervisor:</b> {html.escape(clean_text(row.get('supervisor','')))}<br/>
+                  <b>Nota supervisión:</b> {html.escape(clean_text(row.get('nota_supervision','')))}<br/>
+                  <b>Fecha revisión:</b> {html.escape(clean_text(row.get('fecha_revision','')))}<br/>
+                  <b>Fuente coordenada:</b> {html.escape(clean_text(row.get('fuente_coordenada','')))}<br/>
                   {img_html}
                 </div>
                 ]]>
                 """
 
-                name = f"ID {rid} | D{row.get('distrito_local','')} S{row.get('seccion','')} | {status}"
+                name = f"ID {lona_id} | D{row.get('distrito_local','')} S{row.get('seccion','')} | {status}"
+
                 kml_parts.extend(
                     [
                         "<Placemark>",
@@ -1405,31 +1640,39 @@ def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision"
                         "</Placemark>",
                     ]
                 )
+
             kml_parts.append("</Folder>")
+
         kml_parts.append("</Folder>")
 
     kml_parts.extend(["</Document>", "</kml>"])
     kml_text = "\n".join(kml_parts)
 
     buff = io.BytesIO()
+
     with zipfile.ZipFile(buff, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("doc.kml", kml_text.encode("utf-8"))
+
         added = set()
+
         for _, row in valid.iterrows():
-            for img in image_files_for_record(int(row["id"]), row.get("fila_excel")):
+            for img in image_files_for_lona(row):
                 arc = f"files/{img.name}"
-                if arc not in added:
+
+                if arc not in added and img.exists():
                     zf.write(img, arc)
                     added.add(arc)
+
     return buff.getvalue()
 
 
-def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-
-
 def render_kpi(label: str, value: object, note: str = "") -> None:
-    note_html = f"<div style='font-size:.77rem;color:#4A0018;margin-top:6px;font-weight:600'>{html.escape(str(note))}</div>" if note else ""
+    note_html = (
+        f"<div style='font-size:.77rem;color:#4A0018;margin-top:6px;font-weight:600'>{html.escape(str(note))}</div>"
+        if note
+        else ""
+    )
+
     st.markdown(
         f"""
         <div class='kpi-card'>
@@ -1444,162 +1687,183 @@ def render_kpi(label: str, value: object, note: str = "") -> None:
 
 def render_status_legend() -> None:
     rows = []
+
     for status in STATUS_OPTIONS:
         rows.append(
             f"<div style='margin:7px 0;font-weight:700;color:#1F171A'><span class='legend-dot' style='background:{STATUS_COLORS[status]}'></span>{html.escape(status)}</div>"
         )
+
     st.markdown("".join(rows), unsafe_allow_html=True)
 
 
-def filter_df(df: pd.DataFrame, distritos, secciones, estatuses, query: str, only_mapeables: bool = False) -> pd.DataFrame:
+def filter_df(
+    df: pd.DataFrame,
+    distritos,
+    secciones,
+    estatuses,
+    query: str,
+) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
     out = df.copy()
-    if only_mapeables:
-        out = out.dropna(subset=["latitud_mapa", "longitud_mapa"])
+
     if distritos:
         out = out[out["distrito_local"].astype(str).isin([str(x) for x in distritos])]
+
     if secciones:
         out = out[out["seccion"].astype(str).isin([str(x) for x in secciones])]
+
     if estatuses:
         out = out[out["estatus"].isin(estatuses)]
 
-    q = clean_value(query).lower()
+    q = clean_text(query).lower()
+
     if q:
         cols = [
-            c for c in [
-                "archivo_origen", "colonia", "direccion", "observaciones", "responsable", "municipio",
-                "seccion", "distrito_local", "nombre_enlace", "celular", "link_maps"
-            ] if c in out.columns
+            c
+            for c in [
+                "archivo_origen",
+                "responsable",
+                "municipio",
+                "distrito_local",
+                "seccion",
+                "colonia",
+                "direccion",
+                "nombre_enlace",
+                "celular",
+                "observaciones",
+                "link_maps",
+            ]
+            if c in out.columns
         ]
+
         mask = pd.Series(False, index=out.index)
+
         for col in cols:
-            mask = mask | out[col].astype(str).str.lower().str.contains(re.escape(q), na=False, regex=True)
+            mask = mask | out[col].astype(str).str.lower().str.contains(
+                re.escape(q),
+                na=False,
+                regex=True,
+            )
+
         out = out[mask]
+
     return out
 
 
-def update_review(record_id: int, estatus: str, supervisor: str, nota: str, lat_corr: str, lon_corr: str) -> None:
-    lat_val = to_float(lat_corr)
-    lon_val = to_float(lon_corr)
-    with get_conn() as conn:
-        conn.execute(
-            """
-            UPDATE lonas
-            SET estatus = ?, supervisor = ?, nota_supervision = ?,
-                latitud_corregida = ?, longitud_corregida = ?, fecha_revision = ?
-            WHERE id = ?
-            """,
-            (
-                estatus,
-                supervisor.strip(),
-                nota.strip(),
-                lat_val,
-                lon_val,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                int(record_id),
-            ),
-        )
-        conn.commit()
+# =========================================================
+# INICIALIZACIÓN
+# =========================================================
 
-
-def update_manual_coordinate(record_id: int, lat: str, lon: str, note: str = "") -> None:
-    lat_f = to_float(lat)
-    lon_f = to_float(lon)
-    if lat_f is None or lon_f is None:
-        raise ValueError("Coordenadas inválidas")
-    if not (-90 <= lat_f <= 90 and -180 <= lon_f <= 180):
-        raise ValueError("Coordenadas fuera de rango")
-
-    with get_conn() as conn:
-        conn.execute(
-            """
-            UPDATE lonas
-            SET latitud = ?, longitud = ?, fuente_coordenada = 'captura_manual',
-                estado_coordenada = 'exacta', nota_supervision = COALESCE(nota_supervision, '') || ?
-            WHERE id = ?
-            """,
-            (lat_f, lon_f, f"\nCoordenada manual: {note}" if note else "\nCoordenada manual.", int(record_id)),
-        )
-        conn.commit()
-
-
-# -----------------------------
-# Inicio de app
-# -----------------------------
 init_db()
-migrate_initial_csvs_if_needed()
+seed_from_csv_if_empty()
 df = load_lonas_df()
 
 st.markdown(
     """
     <div class='hero-card'>
         <div class='hero-title'>📍 Supervisión de Lonas</div>
-        <p class='hero-subtitle'>Mapa operativo con base SQLite para cargar Excel, resolver coordenadas, validar ubicación y exportar KMZ.</p>
+        <p class='hero-subtitle'>Mapa operativo para validar ubicación, evidencia fotográfica y estatus de revisión.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-if df.empty:
-    st.warning("La base de datos aún no tiene registros. Entra a la pestaña 'Cargar Excel' para importar tu primer archivo.")
 
+# =========================================================
+# SIDEBAR
+# =========================================================
 
-# -----------------------------
-# Sidebar
-# -----------------------------
 st.sidebar.markdown("### Filtros")
 
-all_distritos = sorted(df["distrito_local"].dropna().astype(str).unique().tolist(), key=lambda x: (len(x), x)) if not df.empty else []
-sel_distritos = st.sidebar.multiselect("Distrito local", all_distritos, default=all_distritos)
+if df.empty:
+    all_distritos = []
+else:
+    all_distritos = sorted(
+        [x for x in df["distrito_local"].dropna().astype(str).unique().tolist() if x.strip()],
+        key=lambda x: (len(x), x),
+    )
 
-seccion_source = df[df["distrito_local"].astype(str).isin(sel_distritos)] if (sel_distritos and not df.empty) else df
-all_secciones = sorted(seccion_source["seccion"].dropna().astype(str).unique().tolist(), key=lambda x: (len(x), x)) if not seccion_source.empty else []
+sel_distritos = st.sidebar.multiselect(
+    "Distrito local",
+    all_distritos,
+    default=all_distritos,
+)
+
+seccion_source = df[df["distrito_local"].astype(str).isin(sel_distritos)] if sel_distritos and not df.empty else df
+
+if seccion_source.empty:
+    all_secciones = []
+else:
+    all_secciones = sorted(
+        [x for x in seccion_source["seccion"].dropna().astype(str).unique().tolist() if x.strip()],
+        key=lambda x: (len(x), x),
+    )
+
 sel_secciones = st.sidebar.multiselect("Sección", all_secciones)
 sel_estatus = st.sidebar.multiselect("Estatus", STATUS_OPTIONS, default=[])
 query = st.sidebar.text_input("Buscar", placeholder="Colonia, dirección, sección...")
-only_mapeables = st.sidebar.checkbox("Solo registros con coordenada", value=False)
 
 st.sidebar.divider()
 st.sidebar.markdown("### Visualización del mapa")
-map_style = st.sidebar.selectbox("Tipo de mapa base", list(TILE_OPTIONS.keys()), index=0)
+
+map_style = st.sidebar.selectbox(
+    "Tipo de mapa base",
+    list(TILE_OPTIONS.keys()),
+    index=0,
+)
+
 cluster_points = st.sidebar.checkbox("Agrupar puntos cercanos", value=False)
 
-filtered = filter_df(df, sel_distritos, sel_secciones, sel_estatus, query, only_mapeables=only_mapeables) if not df.empty else df
+filtered = filter_df(df, sel_distritos, sel_secciones, sel_estatus, query)
 
 st.sidebar.divider()
-st.sidebar.markdown("### Base de datos")
-st.sidebar.caption(f"SQLite: `{DB_PATH.name}`")
-if not filtered.empty:
-    st.sidebar.download_button(
-        "Descargar revisión filtrada CSV",
-        dataframe_to_csv_bytes(filtered),
-        file_name="revision_lonas_filtrada.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+st.sidebar.markdown("### Acciones rápidas")
+
+st.sidebar.download_button(
+    "Descargar revisión filtrada CSV",
+    dataframe_to_csv_bytes(filtered),
+    file_name="revision_lonas_filtrada.csv",
+    mime="text/csv",
+    use_container_width=True,
+)
 
 
-# -----------------------------
-# KPIs
-# -----------------------------
+# =========================================================
+# KPIS
+# =========================================================
+
+total_registros = len(df)
+total_mapeables = int(df["latitud_mapa"].notna().sum()) if not df.empty else 0
+total_pendientes_coord = int(df["latitud_mapa"].isna().sum()) if not df.empty else 0
+total_verificados = int((df["estatus"] == "Verificado").sum()) if not df.empty else 0
+total_pendientes_revision = int((df["estatus"] == "Pendiente").sum()) if not df.empty else 0
+
 k1, k2, k3, k4, k5 = st.columns(5)
+
 with k1:
-    render_kpi("Registros totales", len(df), "base SQLite")
+    render_kpi("Registros", total_registros, "base SQLite")
+
 with k2:
-    render_kpi("En filtro", len(filtered), "según selección")
+    render_kpi("Mapeables", total_mapeables, "con coordenada")
+
 with k3:
-    render_kpi("Mapeables", int(df.dropna(subset=["latitud_mapa", "longitud_mapa"]).shape[0]) if not df.empty else 0, "con coordenada")
+    render_kpi("Verificados", total_verificados, "validación positiva")
+
 with k4:
-    render_kpi("Pendientes coord.", int(df["latitud_mapa"].isna().sum()) if not df.empty else 0, "sin punto GPS")
+    render_kpi("Por revisar", total_pendientes_revision, "estatus pendiente")
+
 with k5:
-    total_lonas = pd.to_numeric(df.get("lonas_colocadas", pd.Series(dtype=float)), errors="coerce").fillna(0).sum() if not df.empty else 0
-    render_kpi("Lonas", int(total_lonas), "suma capturada")
+    render_kpi("Sin coordenada", total_pendientes_coord, "requieren captura")
 
 st.write("")
 
 
-# -----------------------------
-# Tabs
-# -----------------------------
+# =========================================================
+# PESTAÑAS
+# =========================================================
+
 tab_map, tab_supervision_map, tab_summary, tab_review, tab_table, tab_pending, tab_export, tab_help, tab_upload = st.tabs(
     [
         "Mapa",
@@ -1614,8 +1878,10 @@ tab_map, tab_supervision_map, tab_summary, tab_review, tab_table, tab_pending, t
     ]
 )
 
+
 with tab_map:
     c1, c2 = st.columns([3.25, 1])
+
     with c2:
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         st.subheader("Leyenda")
@@ -1625,37 +1891,74 @@ with tab_map:
 
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         st.write("**Distribución por estatus**")
-        if filtered.empty:
-            st.caption("Sin registros con los filtros actuales.")
+
+        mapped_filtered = filtered.dropna(subset=["latitud_mapa", "longitud_mapa"]) if not filtered.empty else filtered
+
+        if mapped_filtered.empty:
+            st.caption("Sin registros mapeables con los filtros actuales.")
         else:
-            st.dataframe(filtered["estatus"].value_counts().rename_axis("estatus").reset_index(name="total"), hide_index=True, use_container_width=True)
+            st.dataframe(
+                mapped_filtered["estatus"].value_counts().rename_axis("estatus").reset_index(name="total"),
+                hide_index=True,
+                use_container_width=True,
+            )
+
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("<div class='note-box'>Puedes cambiar el mapa base desde el panel izquierdo: calles, satélite, terreno o modo oscuro.</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='note-box'>Puedes cambiar el mapa base desde el panel izquierdo: calles, satélite, terreno o modo oscuro.</div>",
+            unsafe_allow_html=True,
+        )
 
     with c1:
-        selected_for_map = st.session_state.get("selected_record_id")
-        m = make_map(filtered, selected_for_map, selected_tile=map_style, cluster_points=cluster_points)
+        selected_for_map = st.session_state.get("selected_lona_id")
+        m = make_map(
+            filtered,
+            selected_for_map,
+            selected_tile=map_style,
+            cluster_points=cluster_points,
+        )
         st_folium(m, width=1280, height=680, returned_objects=[])
+
 
 with tab_supervision_map:
     st.subheader("Mapa de supervisión")
-    st.caption("Vista general agrupada: cada burbuja muestra el total de lonas/registros en esa zona. Al acercarte con zoom, los puntos se despliegan individualmente.")
+    st.caption(
+        "Vista general agrupada: cada burbuja muestra el total de lonas/registros en esa zona. "
+        "Al acercarte con zoom, los puntos se despliegan individualmente."
+    )
+
     ms1, ms2 = st.columns([3.25, 1])
 
     with ms2:
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         st.write("**Configuración**")
-        supervision_tile = st.selectbox("Mapa base", list(TILE_OPTIONS.keys()), index=list(TILE_OPTIONS.keys()).index(map_style) if map_style in TILE_OPTIONS else 0, key="supervision_tile")
+
+        supervision_tile = st.selectbox(
+            "Mapa base",
+            list(TILE_OPTIONS.keys()),
+            index=list(TILE_OPTIONS.keys()).index(map_style) if map_style in TILE_OPTIONS else 0,
+            key="supervision_tile",
+        )
+
         st.caption("El cluster muestra el total. Click sobre la burbuja para acercar y separar puntos.")
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         st.write("**Totales en filtro**")
-        render_kpi("Registros agrupados", len(filtered), "según filtros activos")
+
+        filtered_mapped = filtered.dropna(subset=["latitud_mapa", "longitud_mapa"]) if not filtered.empty else filtered
+        render_kpi("Registros agrupados", len(filtered_mapped), "según filtros activos")
+
         if not filtered.empty:
-            resumen_dist = filtered.groupby("distrito_local", dropna=False).size().reset_index(name="total").sort_values("total", ascending=False)
+            resumen_dist = (
+                filtered.groupby("distrito_local", dropna=False)
+                .size()
+                .reset_index(name="total")
+                .sort_values("total", ascending=False)
+            )
             st.dataframe(resumen_dist, hide_index=True, use_container_width=True)
+
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
@@ -1664,70 +1967,107 @@ with tab_supervision_map:
         st.markdown("</div>", unsafe_allow_html=True)
 
     with ms1:
-        st_folium(make_supervision_cluster_map(filtered, selected_tile=supervision_tile), width=1280, height=720, returned_objects=[])
+        m_supervision = make_supervision_cluster_map(filtered, selected_tile=supervision_tile)
+        st_folium(m_supervision, width=1280, height=720, returned_objects=[])
+
 
 with tab_summary:
     st.subheader("Resumen operativo")
-    a, b = st.columns([1, 1])
-    with a:
-        st.write("**Registros por distrito y sección**")
-        if filtered.empty:
-            st.warning("No hay registros con los filtros actuales.")
-        else:
-            dist = filtered.groupby(["distrito_local", "seccion"], dropna=False).size().reset_index(name="total")
-            st.dataframe(dist.sort_values(["distrito_local", "seccion"]), hide_index=True, use_container_width=True)
-    with b:
-        st.write("**Coordenadas por fuente**")
-        if not filtered.empty:
-            st.dataframe(filtered["fuente_coordenada"].fillna("pendiente").replace("", "pendiente").value_counts().rename_axis("fuente").reset_index(name="total"), hide_index=True, use_container_width=True)
-        st.write("**Avance general de supervisión**")
-        total = len(df)
-        verificados = int((df["estatus"] == "Verificado").sum()) if not df.empty else 0
-        avance = (verificados / total * 100) if total else 0
-        st.progress(avance / 100 if total else 0)
-        st.caption(f"{avance:.1f}% verificado sobre registros totales.")
 
-    st.write("**Historial de cargas**")
-    uploads_df = load_uploads_df()
-    if uploads_df.empty:
-        st.caption("Sin cargas registradas todavía.")
+    if df.empty:
+        st.warning("La base está vacía. Carga un Excel desde la pestaña Cargar Excel.")
     else:
-        st.dataframe(uploads_df, hide_index=True, use_container_width=True)
+        a, b = st.columns([1, 1])
+
+        with a:
+            st.write("**Registros por distrito y sección**")
+
+            dist = (
+                filtered.groupby(["distrito_local", "seccion"], dropna=False)
+                .size()
+                .reset_index(name="total")
+            )
+
+            st.dataframe(
+                dist.sort_values(["distrito_local", "seccion"]),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+        with b:
+            st.write("**Estatus de supervisión**")
+
+            status_df = filtered["estatus"].value_counts().rename_axis("estatus").reset_index(name="total")
+            st.dataframe(status_df, hide_index=True, use_container_width=True)
+
+            st.write("**Avance general**")
+            avance = (total_verificados / total_registros * 100) if total_registros else 0
+            st.progress(avance / 100)
+            st.caption(f"{avance:.1f}% verificado sobre registros totales.")
+
+        st.write("**Estado de coordenadas**")
+
+        coord_df = (
+            df["estado_coordenada"]
+            .fillna("pendiente")
+            .replace("", "pendiente")
+            .value_counts()
+            .rename_axis("estado_coordenada")
+            .reset_index(name="total")
+        )
+
+        st.dataframe(coord_df, hide_index=True, use_container_width=True)
+
 
 with tab_review:
     st.subheader("Revisión individual")
-    mapeables_filtered = filtered.dropna(subset=["latitud_mapa", "longitud_mapa"]) if not filtered.empty else filtered
 
-    if mapeables_filtered.empty:
+    mapped_filtered = filtered.dropna(subset=["latitud_mapa", "longitud_mapa"]) if not filtered.empty else filtered
+
+    if mapped_filtered.empty:
         st.warning("No hay registros mapeables con los filtros actuales.")
     else:
-        filtered_options = mapeables_filtered.sort_values(["distrito_local", "seccion", "id"]).copy()
+        filtered_options = mapped_filtered.sort_values(["distrito_local", "seccion", "id"]).copy()
+
         option_labels = {
             int(row.id): f"ID {int(row.id)} | D{row.distrito_local} S{row.seccion} | {row.colonia} | {str(row.direccion)[:55]}"
             for _, row in filtered_options.iterrows()
         }
-        default_id = st.session_state.get("selected_record_id")
+
+        default_id = st.session_state.get("selected_lona_id")
         ids = list(option_labels.keys())
         default_index = ids.index(default_id) if default_id in ids else 0
-        selected_id = st.selectbox("Selecciona el registro a revisar", ids, index=default_index, format_func=lambda x: option_labels.get(x, str(x)))
-        st.session_state["selected_record_id"] = selected_id
+
+        selected_id = st.selectbox(
+            "Selecciona el registro a revisar",
+            ids,
+            index=default_index,
+            format_func=lambda x: option_labels.get(x, str(x)),
+        )
+
+        st.session_state["selected_lona_id"] = selected_id
 
         row = df[df["id"].astype(int) == int(selected_id)].iloc[0]
+
         left, right = st.columns([1.15, 1])
 
         with left:
             st.markdown(f"### ID {selected_id}")
-            st.write(f"**Archivo:** {row.get('archivo_origen','')} | **Fila Excel:** {row.get('fila_excel','')}")
             st.write(f"**Distrito local:** {row.get('distrito_local','')}  |  **Sección:** {row.get('seccion','')}")
             st.write(f"**Colonia:** {row.get('colonia','')}")
             st.write(f"**Dirección:** {row.get('direccion','')}")
+            st.write(f"**Responsable:** {row.get('responsable','')}")
+            st.write(f"**Observaciones:** {row.get('observaciones','')}")
             st.write(f"**Fuente coordenada:** {row.get('fuente_coordenada','')}")
-            st.write(f"**Observaciones origen:** {row.get('observaciones','')}")
-            if str(row.get("link_maps", "")):
-                st.link_button("Abrir link original de Google Maps", str(row.get("link_maps")))
-            imgs = image_files_for_record(selected_id, row.get("fila_excel"))
+
+            if clean_text(row.get("link_maps", "")):
+                st.link_button("Abrir link original de Google Maps", clean_text(row.get("link_maps")))
+
+            imgs = image_files_for_lona(row)
+
             if imgs:
                 st.markdown("**Evidencia fotográfica**")
+
                 for img in imgs[:3]:
                     st.image(str(img), caption=img.name, use_container_width=True)
             else:
@@ -1735,186 +2075,412 @@ with tab_review:
 
         with right:
             with st.form("form_revision"):
-                estatus_actual = row.get("estatus", "Pendiente") or "Pendiente"
-                estatus = st.selectbox("Estatus de supervisión", STATUS_OPTIONS, index=STATUS_OPTIONS.index(estatus_actual) if estatus_actual in STATUS_OPTIONS else 0)
-                supervisor = st.text_input("Supervisor", value=str(row.get("supervisor", "") or ""), placeholder="Nombre de quien revisa")
-                nota = st.text_area("Nota de supervisión", value=str(row.get("nota_supervision", "") or ""), height=120)
+                estatus_actual = clean_text(row.get("estatus", "Pendiente")) or "Pendiente"
+
+                estatus = st.selectbox(
+                    "Estatus de supervisión",
+                    STATUS_OPTIONS,
+                    index=STATUS_OPTIONS.index(estatus_actual) if estatus_actual in STATUS_OPTIONS else 0,
+                )
+
+                supervisor = st.text_input(
+                    "Supervisor",
+                    value=clean_text(row.get("supervisor", "")) or st.session_state.get("auth_name", ""),
+                )
+
+                nota = st.text_area(
+                    "Nota de supervisión",
+                    value=clean_text(row.get("nota_supervision", "")),
+                    height=120,
+                )
+
                 st.markdown("**Corrección opcional de coordenadas**")
                 st.caption("Déjalas vacías si la ubicación original es correcta.")
-                lat_corr = st.text_input("Latitud corregida", value="" if pd.isna(row.get("latitud_corregida")) else str(row.get("latitud_corregida")))
-                lon_corr = st.text_input("Longitud corregida", value="" if pd.isna(row.get("longitud_corregida")) else str(row.get("longitud_corregida")))
+
+                lat_corr = st.text_input("Latitud corregida")
+                lon_corr = st.text_input("Longitud corregida")
+
                 guardar = st.form_submit_button("Guardar revisión", use_container_width=True)
 
                 if guardar:
-                    if (clean_value(lat_corr) and not clean_value(lon_corr)) or (clean_value(lon_corr) and not clean_value(lat_corr)):
-                        st.error("Captura latitud y longitud corregidas, o deja ambas vacías.")
+                    lat_val = to_float(lat_corr)
+                    lon_val = to_float(lon_corr)
+
+                    if (clean_text(lat_corr) and lat_val is None) or (clean_text(lon_corr) and lon_val is None):
+                        st.error("Las coordenadas corregidas no son válidas.")
+                    elif (lat_val is not None and not -90 <= lat_val <= 90) or (lon_val is not None and not -180 <= lon_val <= 180):
+                        st.error("Las coordenadas corregidas están fuera de rango.")
                     else:
-                        coord_ok = True
-                        if clean_value(lat_corr) and clean_value(lon_corr):
-                            lat_f = to_float(lat_corr)
-                            lon_f = to_float(lon_corr)
-                            coord_ok = lat_f is not None and lon_f is not None and -90 <= lat_f <= 90 and -180 <= lon_f <= 180
-                        if not coord_ok:
-                            st.error("Las coordenadas corregidas no son válidas.")
-                        else:
-                            update_review(selected_id, estatus, supervisor, nota, lat_corr, lon_corr)
-                            st.success("Revisión guardada. El mapa se actualizará con el nuevo estatus/coordenada.")
-                            st.rerun()
+                        update_lona_review(
+                            selected_id,
+                            estatus,
+                            supervisor.strip(),
+                            nota.strip(),
+                            lat_val,
+                            lon_val,
+                        )
+                        st.success("Revisión guardada.")
+                        st.rerun()
 
             st.markdown("**Vista rápida del punto**")
+
             mini = load_lonas_df()
             mini = mini[mini["id"].astype(int) == int(selected_id)]
-            st_folium(make_map(mini, selected_id, selected_tile=map_style, cluster_points=False), width=650, height=320, returned_objects=[])
+
+            st_folium(
+                make_map(
+                    mini,
+                    selected_id,
+                    selected_tile=map_style,
+                    cluster_points=False,
+                ),
+                width=650,
+                height=320,
+                returned_objects=[],
+            )
+
 
 with tab_table:
     st.subheader("Tabla filtrada")
-    show_cols = [
-        "id", "archivo_origen", "fila_excel", "fecha", "municipio", "distrito_local", "seccion", "colonia",
-        "direccion", "lonas_colocadas", "estatus", "estado_coordenada", "fuente_coordenada", "supervisor",
-        "nota_supervision", "fecha_revision", "latitud_mapa", "longitud_mapa", "observaciones", "link_maps",
-    ]
-    show_cols = [c for c in show_cols if c in filtered.columns]
+
     if filtered.empty:
-        st.caption("Sin registros con los filtros actuales.")
+        st.warning("No hay registros con los filtros actuales.")
     else:
-        st.dataframe(filtered[show_cols].sort_values(["distrito_local", "seccion", "id"]), use_container_width=True, hide_index=True)
+        show_cols = [
+            "id",
+            "archivo_origen",
+            "fecha",
+            "responsable",
+            "municipio",
+            "distrito_local",
+            "seccion",
+            "colonia",
+            "direccion",
+            "nombre_enlace",
+            "celular",
+            "lonas_colocadas",
+            "estatus",
+            "supervisor",
+            "nota_supervision",
+            "fecha_revision",
+            "latitud_mapa",
+            "longitud_mapa",
+            "fuente_coordenada",
+            "estado_coordenada",
+            "observaciones",
+            "link_maps",
+        ]
 
-with tab_pending:
-    st.subheader("Registros pendientes sin coordenada directa")
-    st.caption("Aquí puedes resolver links cortos o capturar coordenadas manualmente para que aparezcan en el mapa.")
-    pending = df[df["latitud_mapa"].isna() | df["longitud_mapa"].isna()].copy() if not df.empty else pd.DataFrame()
+        show_cols = [c for c in show_cols if c in filtered.columns]
 
-    p1, p2 = st.columns([1, 1])
-    with p1:
-        max_resolve = st.number_input("Resolver automáticamente hasta N pendientes", min_value=1, max_value=5000, value=50, step=10)
-    with p2:
-        st.write("")
-        st.write("")
-        if st.button("Intentar resolver links cortos", use_container_width=True):
-            stats = resolve_pending_links(max_items=int(max_resolve))
-            st.success(f"Procesados: {stats['procesados']} | Resueltos: {stats['resueltos']} | Pendientes: {stats['pendientes']}")
-            st.rerun()
-
-    if pending.empty:
-        st.success("No hay pendientes sin coordenada.")
-    else:
         st.dataframe(
-            pending[[c for c in ["id", "archivo_origen", "fila_excel", "responsable", "distrito_local", "seccion", "colonia", "direccion", "link_maps", "fuente_coordenada"] if c in pending.columns]],
+            filtered[show_cols].sort_values(["distrito_local", "seccion", "id"]),
             use_container_width=True,
             hide_index=True,
         )
-        st.download_button("Descargar pendientes CSV", dataframe_to_csv_bytes(pending), file_name="lonas_pendientes_sin_coordenada.csv", mime="text/csv", use_container_width=True)
 
-        st.markdown("### Captura manual de coordenada")
-        pending_ids = pending["id"].astype(int).tolist()
-        selected_pending = st.selectbox("Selecciona ID pendiente", pending_ids, format_func=lambda x: f"ID {x}")
-        prow = pending[pending["id"].astype(int) == int(selected_pending)].iloc[0]
-        st.write(f"**Dirección:** {prow.get('direccion','')}")
-        if clean_value(prow.get("link_maps", "")):
-            st.link_button("Abrir link de Maps", str(prow.get("link_maps")))
-        with st.form("manual_coord_form"):
-            man_lat = st.text_input("Latitud")
-            man_lon = st.text_input("Longitud")
-            man_note = st.text_input("Nota", placeholder="Ej. coordenada copiada manualmente de Google Maps")
-            save_coord = st.form_submit_button("Guardar coordenada manual", use_container_width=True)
-            if save_coord:
-                try:
-                    update_manual_coordinate(selected_pending, man_lat, man_lon, man_note)
-                    st.success("Coordenada guardada. El registro ya aparecerá en el mapa.")
+
+with tab_pending:
+    st.subheader("Pendientes sin coordenada")
+
+    pendientes_df = df[df["latitud_mapa"].isna() | df["longitud_mapa"].isna()].copy() if not df.empty else pd.DataFrame()
+
+    st.caption(
+        "Estos registros no tienen coordenada exacta. Puedes intentar resolver links cortos o capturar coordenadas manualmente."
+    )
+
+    if pendientes_df.empty:
+        st.success("No hay pendientes sin coordenada.")
+    else:
+        c1, c2, c3 = st.columns([1, 1, 1])
+
+        with c1:
+            block_size = st.number_input(
+                "Resolver por bloque",
+                min_value=1,
+                max_value=500,
+                value=50,
+                step=10,
+            )
+
+        with c2:
+            st.write("")
+            st.write("")
+            resolve_block = st.button("Resolver links cortos pendientes", use_container_width=True)
+
+        with c3:
+            st.download_button(
+                "Descargar pendientes CSV",
+                dataframe_to_csv_bytes(pendientes_df),
+                file_name="lonas_pendientes_sin_coordenada.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        if resolve_block:
+            to_resolve = pendientes_df[pendientes_df["link_maps"].astype(str).str.len() > 0].head(int(block_size)).copy()
+
+            if to_resolve.empty:
+                st.warning("No hay links para resolver en el bloque seleccionado.")
+            else:
+                progress = st.progress(0)
+                ok_count = 0
+
+                for i, (_, row) in enumerate(to_resolve.iterrows(), start=1):
+                    result = resolve_maps_link(row.get("link_maps", ""), try_expand=True)
+
+                    if result["latitud"] is not None and result["longitud"] is not None:
+                        update_lona_coords(
+                            int(row["id"]),
+                            result["latitud"],
+                            result["longitud"],
+                            result["fuente_coordenada"],
+                            result["estado_coordenada"],
+                            result["url_expandida"],
+                        )
+                        ok_count += 1
+                    else:
+                        update_lona_expanded_url(int(row["id"]), result.get("url_expandida", ""))
+
+                    progress.progress(i / len(to_resolve))
+
+                st.success(f"Proceso terminado. Coordenadas resueltas: {ok_count} de {len(to_resolve)}.")
+                st.rerun()
+
+        st.write("### Captura manual")
+
+        pending_options = {
+            int(row.id): f"ID {int(row.id)} | D{row.distrito_local} S{row.seccion} | {row.colonia} | {str(row.direccion)[:55]}"
+            for _, row in pendientes_df.head(1000).iterrows()
+        }
+
+        selected_pending = st.selectbox(
+            "Selecciona pendiente",
+            list(pending_options.keys()),
+            format_func=lambda x: pending_options.get(x, str(x)),
+        )
+
+        row_p = pendientes_df[pendientes_df["id"].astype(int) == int(selected_pending)].iloc[0]
+
+        st.write(f"**Dirección:** {row_p.get('direccion','')}")
+        st.write(f"**Colonia:** {row_p.get('colonia','')}")
+        st.write(f"**Responsable:** {row_p.get('responsable','')}")
+
+        if clean_text(row_p.get("link_maps", "")):
+            st.link_button("Abrir link original", clean_text(row_p.get("link_maps")))
+
+        with st.form("manual_coords_form"):
+            lat_manual = st.text_input("Latitud")
+            lon_manual = st.text_input("Longitud")
+            save_manual = st.form_submit_button("Guardar coordenada manual", use_container_width=True)
+
+            if save_manual:
+                lat = to_float(lat_manual)
+                lon = to_float(lon_manual)
+
+                if lat is None or lon is None:
+                    st.error("Captura latitud y longitud válidas.")
+                elif not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    st.error("Las coordenadas están fuera de rango.")
+                else:
+                    update_lona_coords(
+                        int(selected_pending),
+                        lat,
+                        lon,
+                        "captura_manual",
+                        "exacta",
+                        "",
+                    )
+                    st.success("Coordenada guardada.")
                     st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+
+        st.write("### Tabla de pendientes")
+
+        pending_cols = [
+            "id",
+            "archivo_origen",
+            "responsable",
+            "municipio",
+            "distrito_local",
+            "seccion",
+            "colonia",
+            "direccion",
+            "nombre_enlace",
+            "celular",
+            "link_maps",
+            "url_expandida",
+            "fuente_coordenada",
+            "estado_coordenada",
+            "observaciones",
+        ]
+
+        pending_cols = [c for c in pending_cols if c in pendientes_df.columns]
+
+        st.dataframe(
+            pendientes_df[pending_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+
 
 with tab_export:
     st.subheader("Exportaciones")
-    st.write("Descarga la base SQLite convertida a CSV/JSON o genera un KMZ actualizado con estatus y coordenadas corregidas.")
+
+    st.write("Descarga los avances de supervisión y genera un KMZ actualizado con los estatus y coordenadas corregidas.")
+
     export_all = st.checkbox("Exportar todos los registros", value=True)
     export_df = df if export_all else filtered
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.download_button("CSV de supervisión", dataframe_to_csv_bytes(export_df), file_name="supervision_lonas.csv", mime="text/csv", use_container_width=True)
-    with c2:
-        st.download_button("JSON de base", export_df.to_json(orient="records", force_ascii=False, indent=2).encode("utf-8"), file_name="supervision_lonas.json", mime="application/json", use_container_width=True)
-    with c3:
-        kmz_bytes = build_kmz_bytes(export_df)
-        st.download_button("KMZ actualizado", kmz_bytes, file_name="lonas_supervision_actualizado.kmz", mime="application/vnd.google-earth.kmz", use_container_width=True)
-    with c4:
-        if DB_PATH.exists():
-            st.download_button("Base SQLite", DB_PATH.read_bytes(), file_name="lonas_supervision.db", mime="application/octet-stream", use_container_width=True)
 
-    st.info("En Streamlit Cloud los archivos locales pueden reiniciarse. Para uso formal multiusuario conviene migrar esta misma estructura a Supabase o a un servidor propio.")
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1:
+        st.download_button(
+            "CSV de supervisión",
+            dataframe_to_csv_bytes(export_df),
+            file_name="supervision_lonas.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with c2:
+        kmz_bytes = build_kmz_bytes(export_df)
+
+        st.download_button(
+            "KMZ actualizado",
+            kmz_bytes,
+            file_name="lonas_supervision_actualizado.kmz",
+            mime="application/vnd.google-earth.kmz",
+            use_container_width=True,
+        )
+
+    with c3:
+        if DB_FILE.exists():
+            st.download_button(
+                "Base SQLite",
+                DB_FILE.read_bytes(),
+                file_name="lonas_supervision.db",
+                mime="application/octet-stream",
+                use_container_width=True,
+            )
+
+    with c4:
+        json_bytes = export_df.to_json(orient="records", force_ascii=False, indent=2).encode("utf-8")
+
+        st.download_button(
+            "JSON",
+            json_bytes,
+            file_name="lonas_supervision.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+    st.info(
+        "En Streamlit Cloud la base SQLite local puede reiniciarse. "
+        "Para operación multiusuario formal conviene migrar después a Supabase."
+    )
+
 
 with tab_help:
     st.subheader("Guía rápida de uso")
+
     st.markdown(
         """
         **Flujo recomendado:**
 
-        1. Entra a **Cargar Excel** y sube uno o varios archivos `.xlsx`.
-        2. Si los links son cortos `maps.app.goo.gl`, puedes activar resolución automática, pero puede tardar.
-        3. Los registros con coordenada aparecen en **Mapa** y **Mapa de supervisión**.
-        4. Los registros sin coordenada aparecen en **Pendientes sin coordenada**.
-        5. Desde pendientes puedes intentar resolver links cortos o capturar latitud/longitud manualmente.
-        6. En **Supervisión** marcas estatus, supervisor, nota y coordenada corregida.
-        7. En **Exportar** descargas CSV, JSON, KMZ o la base SQLite.
+        1. Entra con usuario y contraseña.
+        2. Carga nuevos Excel desde la pestaña **Cargar Excel**.
+        3. Evita resolver 1,000+ links al cargar; primero guarda la base.
+        4. En **Pendientes sin coordenada**, resuelve links por bloques.
+        5. Captura coordenadas manuales cuando el link corto no se pueda resolver.
+        6. Revisa cada punto desde **Supervisión**.
+        7. Exporta CSV, KMZ o base SQLite desde **Exportar**.
 
-        **Estados de coordenada:**
+        **Estatus sugeridos:**
 
-        - `exacta`: se obtuvo de link directo, link resuelto, Excel con lat/lon o captura manual.
-        - `pendiente`: no se pudo extraer coordenada todavía.
+        - **Pendiente:** aún no revisado.
+        - **Verificado:** ubicación y evidencia correctas.
+        - **Corregir ubicación:** se detectó que el punto requiere ajuste.
+        - **Retirar/Reponer lona:** hay incidencia física con la lona.
+        - **No localizada:** no se encontró en campo.
 
-        **Nota operativa:** SQLite funciona bien para demo/local. Para varios supervisores en Streamlit Cloud, lo más seguro será Supabase.
+        **Usuarios:** se agregan en Streamlit Secrets, no dentro del código.
         """
     )
 
+
 with tab_upload:
     st.subheader("Cargar Excel")
-    st.caption("Carga nuevos reportes con el formato de lonas. La app detecta encabezados, guarda en SQLite y separa mapeables/pendientes.")
 
-    if openpyxl is None:
-        st.error("Falta instalar openpyxl. Agrégalo a requirements.txt para leer archivos XLSX.")
+    st.caption(
+        "Carga nuevos reportes con formato de lonas. "
+        "La app detecta encabezados, guarda en SQLite y separa mapeables/pendientes."
+    )
 
     uploaded_files = st.file_uploader(
         "Sube uno o varios archivos Excel",
-        type=["xlsx", "xlsm"],
+        type=["xlsx", "xlsm", "xls"],
         accept_multiple_files=True,
     )
 
     resolve_on_upload = st.checkbox(
         "Intentar resolver links cortos al cargar",
         value=False,
-        help="Puede tardar si el archivo trae muchos links maps.app.goo.gl. Para 1,600 registros conviene cargar primero y resolver por bloques desde Pendientes.",
+        help="Para archivos grandes conviene dejarlo desactivado y resolver por bloques desde Pendientes sin coordenada.",
     )
 
     if uploaded_files:
         st.write("**Archivos recibidos:**")
-        for uf in uploaded_files:
-            st.write(f"- {uf.name}")
 
-        if st.button("Procesar e integrar a la base SQLite", type="primary", use_container_width=True):
-            total_stats = []
-            for uf in uploaded_files:
-                file_bytes = uf.getvalue()
-                try:
-                    with st.spinner(f"Procesando {uf.name}..."):
-                        stats = import_excel_to_db(file_bytes, uf.name, resolve_links=resolve_on_upload)
-                    total_stats.append({"archivo": uf.name, **stats})
-                    st.success(
-                        f"{uf.name}: leídos {stats['registros_leidos']}, insertados {stats['insertados']}, "
-                        f"duplicados {stats['duplicados']}, mapeables {stats['mapeables']}, pendientes {stats['pendientes']}, "
-                        f"imágenes {stats['imagenes_extraidas']}"
-                    )
-                except Exception as e:
-                    st.error(f"Error procesando {uf.name}: {e}")
+        for f in uploaded_files:
+            st.write(f"- {f.name}")
 
-            if total_stats:
-                st.dataframe(pd.DataFrame(total_stats), hide_index=True, use_container_width=True)
-                st.info("Carga terminada. Actualizando app...")
-                time.sleep(1)
-                st.rerun()
+        if st.button("Procesar e integrar a la base SQLite", use_container_width=True):
+            results = []
+
+            with st.spinner("Procesando archivos..."):
+                for uploaded_file in uploaded_files:
+                    try:
+                        total, inserted, duplicated, mapeables, pendientes = parse_excel_file(
+                            uploaded_file,
+                            resolve_short_links=resolve_on_upload,
+                        )
+
+                        results.append(
+                            {
+                                "archivo": uploaded_file.name,
+                                "registros_leidos": total,
+                                "insertados": inserted,
+                                "duplicados": duplicated,
+                                "mapeables": mapeables,
+                                "pendientes": pendientes,
+                            }
+                        )
+
+                    except Exception as e:
+                        results.append(
+                            {
+                                "archivo": uploaded_file.name,
+                                "error": str(e),
+                            }
+                        )
+
+            st.success("Proceso terminado.")
+            st.dataframe(pd.DataFrame(results), hide_index=True, use_container_width=True)
+            st.rerun()
 
     st.divider()
-    st.markdown("### Vista de base actual")
-    st.write(f"Registros totales en SQLite: **{len(df)}**")
-    st.write(f"Mapeables: **{int(df.dropna(subset=['latitud_mapa', 'longitud_mapa']).shape[0]) if not df.empty else 0}**")
-    st.write(f"Pendientes sin coordenada: **{int(df['latitud_mapa'].isna().sum()) if not df.empty else 0}**")
+    st.subheader("Vista de base actual")
+
+    st.write(f"Registros totales en SQLite: **{total_registros}**")
+    st.write(f"Mapeables: **{total_mapeables}**")
+    st.write(f"Pendientes sin coordenada: **{total_pendientes_coord}**")
+
+    with get_conn() as conn:
+        uploads_df = pd.read_sql_query(
+            "SELECT * FROM uploads ORDER BY id DESC LIMIT 20",
+            conn,
+        )
+
+    if not uploads_df.empty:
+        st.write("**Últimas cargas:**")
+        st.dataframe(uploads_df, hide_index=True, use_container_width=True)
