@@ -601,15 +601,6 @@ st.sidebar.download_button(
     mime="text/csv",
     use_container_width=True,
 )
-st.sidebar.markdown(
-    """
-    <div class='note-box'>
-    Las opciones de WhatsApp fueron retiradas. Para compartir avances, exporta CSV/KMZ o publica la app en Streamlit Cloud y comparte el enlace.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 # -----------------------------
 # KPIs
 # -----------------------------
