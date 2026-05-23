@@ -403,10 +403,35 @@ def db_count_lonas() -> int:
 
 
 def clean_value(value: object) -> str:
+    """
+    Limpia valores escalares de Excel/SQLite.
+    También evita el error: The truth value of a Series is ambiguous,
+    que aparece cuando un Excel trae encabezados duplicados como CELULAR/CELULAR.
+    """
     if value is None:
         return ""
-    if pd.isna(value):
+
+    # Si por columnas duplicadas llega una Serie/lista, toma el primer valor útil.
+    if isinstance(value, pd.Series):
+        for item in value.tolist():
+            cleaned = clean_value(item)
+            if cleaned:
+                return cleaned
         return ""
+
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            cleaned = clean_value(item)
+            if cleaned:
+                return cleaned
+        return ""
+
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+
     text = str(value).strip()
     if text.lower() in ["nan", "none", "nat"]:
         return ""
@@ -791,7 +816,7 @@ def resolve_pending_links(max_items: int = 50, sleep_sec: float = 0.15) -> Dict[
         else:
             stats["pendientes"] += 1
 
-        if progress:
+        if progress is not None:
             progress.progress(i / len(rows))
         time.sleep(sleep_sec)
 
@@ -887,6 +912,56 @@ def find_header_row(raw_df: pd.DataFrame) -> int:
     return best_idx
 
 
+
+
+def build_unique_import_headers(headers: List[object]) -> List[str]:
+    """
+    Convierte encabezados del Excel a nombres internos únicos.
+    Soluciona archivos con columnas duplicadas, por ejemplo CELULAR en dos secciones.
+    Regla práctica: si hay dos CELULAR, conserva el último como teléfono del enlace/contacto.
+    """
+    canon_by_index = [canonical_col(h) for h in headers]
+    keep_index_by_canon: Dict[str, int] = {}
+
+    for idx, canon in enumerate(canon_by_index):
+        if not canon:
+            continue
+
+        if canon not in keep_index_by_canon:
+            keep_index_by_canon[canon] = idx
+        else:
+            # En este formato existe CELULAR del responsable y CELULAR del enlace.
+            # Para supervisión conviene conservar el último, que suele estar junto a NOMBRE DEL ENLACE.
+            if canon == "celular":
+                keep_index_by_canon[canon] = idx
+            # Para las demás columnas repetidas, conserva la primera aparición.
+
+    out: List[str] = []
+    used_extra: Dict[str, int] = {}
+
+    for idx, raw_header in enumerate(headers):
+        canon = canon_by_index[idx]
+
+        if canon and keep_index_by_canon.get(canon) == idx:
+            out.append(canon)
+            continue
+
+        base = normalize_col_name(raw_header) or f"col_{idx + 1}"
+        base = re.sub(r"[^a-z0-9_]+", "_", base).strip("_") or f"col_{idx + 1}"
+        base = f"extra_{base[:28]}"
+        used_extra[base] = used_extra.get(base, 0) + 1
+        suffix = used_extra[base]
+        out.append(base if suffix == 1 else f"{base}_{suffix}")
+
+    # Garantía final: no permitir columnas duplicadas.
+    final: List[str] = []
+    counts: Dict[str, int] = {}
+    for name in out:
+        counts[name] = counts.get(name, 0) + 1
+        final.append(name if counts[name] == 1 else f"{name}_{counts[name]}")
+
+    return final
+
 def read_excel_records(file_bytes: bytes, filename: str, resolve_links: bool = False) -> Tuple[pd.DataFrame, Dict[int, int]]:
     xls = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
     # Toma la primera hoja con más contenido.
@@ -903,18 +978,11 @@ def read_excel_records(file_bytes: bytes, filename: str, resolve_links: bool = F
     header_idx = find_header_row(raw)
     headers = raw.iloc[header_idx].tolist()
     data = raw.iloc[header_idx + 1 :].copy()
-    data.columns = headers
+    data.columns = build_unique_import_headers(headers)
     data = data.dropna(how="all")
 
-    rename_map = {}
-    used = set()
-    for col in data.columns:
-        canon = canonical_col(col)
-        if canon and canon not in used:
-            rename_map[col] = canon
-            used.add(canon)
-
-    data = data.rename(columns=rename_map)
+    # Defensa adicional contra encabezados duplicados o celdas combinadas.
+    data = data.loc[:, ~pd.Index(data.columns).duplicated()].copy()
 
     for col in BASE_COLUMNS:
         if col not in data.columns and col not in ["id", "registro_hash", "fecha_carga", "estatus", "estado_coordenada", "fuente_coordenada"]:
@@ -968,7 +1036,7 @@ def read_excel_records(file_bytes: bytes, filename: str, resolve_links: bool = F
         rows_out.append(row)
         excel_row_to_temp_index[excel_row] = len(rows_out) - 1
 
-        if progress:
+        if progress is not None:
             progress.progress(pos / len(data))
 
     return pd.DataFrame(rows_out), excel_row_to_temp_index
