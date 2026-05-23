@@ -14,6 +14,7 @@ import streamlit as st
 from folium.plugins import MarkerCluster, Fullscreen, MeasureControl
 from streamlit_folium import st_folium
 
+
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 IMG_DIR = DATA_DIR / "evidencias"
@@ -22,15 +23,17 @@ REVIEWS_FILE = REVIEWS_DIR / "revisiones_lonas.json"
 MAPEABLES_CSV = DATA_DIR / "lonas_mapeables.csv"
 PENDIENTES_CSV = DATA_DIR / "lonas_pendientes_sin_coordenada.csv"
 
-# Paleta visual inspirada en Morena: guinda, beige cálido, blanco y acentos dorados.
-MORENA_GUINDA = "#8A1538"
-MORENA_GUINDA_DARK = "#5B0F2E"
-MORENA_GUINDA_SOFT = "#B44463"
-MORENA_BEIGE = "#F6EFE7"
-MORENA_BEIGE_2 = "#FBF8F4"
-MORENA_DORADO = "#B08968"
-MORENA_GREEN = "#1B8A5A"
-TEXT_DARK = "#272124"
+
+# Paleta Morena con mayor contraste para escritorio y celular.
+MORENA_GUINDA = "#7A0026"
+MORENA_GUINDA_DARK = "#4A0018"
+MORENA_GUINDA_SOFT = "#A51C48"
+MORENA_BEIGE = "#F1E3D3"
+MORENA_BEIGE_2 = "#FFF8EF"
+MORENA_DORADO = "#C69A2D"
+MORENA_GREEN = "#007A3D"
+TEXT_DARK = "#1F171A"
+
 
 STATUS_OPTIONS = [
     "Pendiente",
@@ -40,6 +43,7 @@ STATUS_OPTIONS = [
     "No localizada",
 ]
 
+
 STATUS_COLORS = {
     "Pendiente": MORENA_GUINDA,
     "Verificado": MORENA_GREEN,
@@ -47,6 +51,7 @@ STATUS_COLORS = {
     "Retirar/Reponer lona": "#B91C1C",
     "No localizada": "#111827",
 }
+
 
 TILE_OPTIONS = {
     "Calles claro": {
@@ -71,12 +76,14 @@ TILE_OPTIONS = {
     },
 }
 
+
 st.set_page_config(
     page_title="Supervisión de Lonas",
     page_icon="📍",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
 
 st.markdown(
     f"""
@@ -91,14 +98,24 @@ st.markdown(
         --texto: {TEXT_DARK};
     }}
 
+    header[data-testid="stHeader"] {{
+        background: transparent;
+        height: 0rem;
+        visibility: hidden;
+    }}
+
+    #MainMenu, footer {{
+        visibility: hidden;
+    }}
+
     .stApp {{
-        background: linear-gradient(180deg, #fffdf9 0%, var(--beige2) 45%, #ffffff 100%);
+        background: linear-gradient(180deg, #fffaf2 0%, var(--beige2) 45%, #ffffff 100%);
         color: var(--texto);
     }}
 
     [data-testid="stSidebar"] {{
         background: linear-gradient(180deg, #ffffff 0%, var(--beige) 100%);
-        border-right: 1px solid rgba(138, 21, 56, .14);
+        border-right: 2px solid rgba(122, 0, 38, .28);
     }}
 
     [data-testid="stSidebar"] h1,
@@ -106,126 +123,230 @@ st.markdown(
     [data-testid="stSidebar"] h3,
     [data-testid="stSidebar"] label {{
         color: var(--guinda-dark) !important;
+        font-weight: 800 !important;
     }}
 
     .block-container {{
-        padding-top: 1.4rem;
-        padding-bottom: 2rem;
+        padding-top: 1rem;
+        padding-bottom: 4rem;
     }}
 
     .hero-card {{
         border-radius: 22px;
-        padding: 22px 26px;
+        padding: 24px 28px;
         margin-bottom: 18px;
         color: white;
-        background: linear-gradient(135deg, var(--guinda-dark) 0%, var(--guinda) 52%, var(--guinda-soft) 100%);
-        box-shadow: 0 18px 42px rgba(91, 15, 46, .22);
-        border: 1px solid rgba(255,255,255,.25);
+        background: linear-gradient(135deg, var(--guinda-dark) 0%, var(--guinda) 55%, var(--guinda-soft) 100%);
+        box-shadow: 0 18px 42px rgba(74, 0, 24, .32);
+        border: 1px solid rgba(255,255,255,.35);
     }}
 
     .hero-title {{
-        font-size: 2.05rem;
-        line-height: 1.1;
-        font-weight: 800;
+        font-size: 2.08rem;
+        line-height: 1.08;
+        font-weight: 900;
         letter-spacing: -.02em;
-        margin: 0 0 6px 0;
+        margin: 0 0 8px 0;
+        color: #ffffff;
     }}
 
     .hero-subtitle {{
-        font-size: .98rem;
+        font-size: 1rem;
         margin: 0;
-        opacity: .92;
+        opacity: .96;
+        color: #fff8ef;
+        font-weight: 500;
     }}
 
     .kpi-card {{
-        background: rgba(255,255,255,.92);
-        border: 1px solid rgba(138, 21, 56, .13);
+        background: #ffffff;
+        border: 2px solid rgba(122, 0, 38, .18);
         border-radius: 18px;
-        padding: 15px 17px;
-        box-shadow: 0 10px 25px rgba(39,33,36,.06);
-        min-height: 92px;
+        padding: 16px 18px;
+        box-shadow: 0 10px 25px rgba(74,0,24,.10);
+        min-height: 98px;
     }}
 
     .kpi-label {{
-        color: #6b5f64;
+        color: #4A0018;
         font-size: .78rem;
         text-transform: uppercase;
-        letter-spacing: .08em;
-        font-weight: 700;
-        margin-bottom: 7px;
+        letter-spacing: .09em;
+        font-weight: 900;
+        margin-bottom: 8px;
     }}
 
     .kpi-number {{
-        color: var(--guinda-dark);
-        font-size: 2rem;
-        font-weight: 800;
+        color: var(--guinda);
+        font-size: 2.15rem;
+        font-weight: 900;
         line-height: 1;
     }}
 
     .section-card {{
-        background: rgba(255,255,255,.94);
-        border: 1px solid rgba(138, 21, 56, .12);
+        background: #ffffff;
+        border: 2px solid rgba(122, 0, 38, .16);
         border-radius: 18px;
         padding: 16px 18px;
-        box-shadow: 0 10px 22px rgba(39,33,36,.055);
+        box-shadow: 0 10px 24px rgba(74,0,24,.09);
         margin-bottom: 12px;
     }}
 
     .legend-dot {{
         display: inline-block;
-        width: 12px;
-        height: 12px;
+        width: 13px;
+        height: 13px;
         border-radius: 50%;
         margin-right: 8px;
         vertical-align: middle;
-        border: 1px solid rgba(0,0,0,.10);
+        border: 1px solid rgba(0,0,0,.20);
     }}
 
     .note-box {{
-        background: #fff8ef;
-        border: 1px solid rgba(176,137,104,.35);
-        border-left: 5px solid var(--dorado);
+        background: #fff3df;
+        border: 2px solid rgba(198,154,45,.45);
+        border-left: 7px solid var(--dorado);
         border-radius: 14px;
-        padding: 12px 14px;
-        color: #4d3a2e;
+        padding: 13px 15px;
+        color: #3b2418;
         margin: 10px 0;
+        font-weight: 600;
     }}
 
     .stButton > button,
     .stDownloadButton > button,
     div[data-testid="stFormSubmitButton"] button {{
         border-radius: 12px !important;
-        border: 1px solid rgba(138, 21, 56, .18) !important;
-        font-weight: 700 !important;
+        border: 2px solid rgba(122, 0, 38, .30) !important;
+        font-weight: 800 !important;
+        color: var(--guinda-dark) !important;
+        background: #ffffff !important;
+    }}
+
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {{
+        border-color: var(--guinda) !important;
+        color: var(--guinda) !important;
     }}
 
     div[data-testid="stFormSubmitButton"] button,
     .stDownloadButton > button[kind="primary"] {{
         background: var(--guinda) !important;
         color: white !important;
+        border-color: var(--guinda-dark) !important;
     }}
 
     div[data-baseweb="tab-list"] {{
         gap: 8px;
-        border-bottom: 1px solid rgba(138,21,56,.16);
+        border-bottom: 2px solid rgba(122,0,38,.28);
+        overflow-x: auto;
+        white-space: nowrap;
+        padding-bottom: 0px;
     }}
 
     button[data-baseweb="tab"] {{
-        background: rgba(138,21,56,.06);
-        border-radius: 999px 999px 0 0;
-        padding: 8px 16px;
+        background: #ead8cd !important;
+        color: #4A0018 !important;
+        border-radius: 999px 999px 0 0 !important;
+        padding: 10px 18px !important;
+        border: 1px solid rgba(122,0,38,.18) !important;
+        font-weight: 800 !important;
+        opacity: 1 !important;
+    }}
+
+    button[data-baseweb="tab"] p {{
+        color: #4A0018 !important;
+        font-weight: 800 !important;
     }}
 
     button[data-baseweb="tab"][aria-selected="true"] {{
-        color: var(--guinda) !important;
-        border-bottom-color: var(--guinda) !important;
-        font-weight: 800;
+        background: var(--guinda) !important;
+        color: #ffffff !important;
+        border-bottom: 3px solid var(--dorado) !important;
+        font-weight: 900 !important;
+        box-shadow: 0 8px 18px rgba(74,0,24,.22);
+    }}
+
+    button[data-baseweb="tab"][aria-selected="true"] p {{
+        color: #ffffff !important;
+        font-weight: 900 !important;
+    }}
+
+    h1, h2, h3, h4 {{
+        color: var(--guinda-dark);
+        font-weight: 900;
+    }}
+
+    p, span, label, div {{
+        color: inherit;
     }}
 
     iframe {{
         border-radius: 16px;
-        border: 1px solid rgba(138,21,56,.18) !important;
-        box-shadow: 0 12px 26px rgba(39,33,36,.08);
+        border: 2px solid rgba(122,0,38,.24) !important;
+        box-shadow: 0 12px 26px rgba(74,0,24,.12);
+    }}
+
+    @media screen and (max-width: 768px) {{
+
+        .block-container {{
+            padding-left: .85rem;
+            padding-right: .85rem;
+            padding-top: .6rem;
+            padding-bottom: 6rem;
+        }}
+
+        .hero-card {{
+            padding: 18px 18px;
+            border-radius: 18px;
+        }}
+
+        .hero-title {{
+            font-size: 1.55rem;
+        }}
+
+        .hero-subtitle {{
+            font-size: .9rem;
+        }}
+
+        .kpi-card {{
+            min-height: 86px;
+            padding: 14px 15px;
+            border: 2px solid rgba(122,0,38,.24);
+        }}
+
+        .kpi-number {{
+            font-size: 2rem;
+        }}
+
+        .kpi-label {{
+            font-size: .75rem;
+            color: var(--guinda-dark);
+        }}
+
+        div[data-baseweb="tab-list"] {{
+            background: #fff8ef;
+            border-radius: 12px 12px 0 0;
+            padding-top: 6px;
+            padding-left: 4px;
+            padding-right: 4px;
+        }}
+
+        button[data-baseweb="tab"] {{
+            background: #e2c8bc !important;
+            color: var(--guinda-dark) !important;
+            padding: 10px 16px !important;
+            min-width: max-content !important;
+        }}
+
+        button[data-baseweb="tab"][aria-selected="true"] {{
+            background: var(--guinda) !important;
+            color: #ffffff !important;
+        }}
+
+        iframe {{
+            min-height: 560px !important;
+        }}
     }}
     </style>
     """,
@@ -233,30 +354,33 @@ st.markdown(
 )
 
 
-# -----------------------------
-# Utilidades de carga y limpieza
-# -----------------------------
 @st.cache_data(show_spinner=False)
 def load_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
+
     df = pd.read_csv(path, dtype=str, encoding="utf-8-sig").fillna("")
+
     for col in ["latitud", "longitud", "lonas_colocadas", "meta", "avance"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
     if "fila_excel" in df.columns:
         df["fila_excel"] = pd.to_numeric(df["fila_excel"], errors="coerce").astype("Int64")
+
     return df
 
 
 def ensure_reviews_file() -> None:
     REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+
     if not REVIEWS_FILE.exists():
         REVIEWS_FILE.write_text("{}", encoding="utf-8")
 
 
 def load_reviews() -> Dict[str, dict]:
     ensure_reviews_file()
+
     try:
         return json.loads(REVIEWS_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -275,16 +399,26 @@ def normalize_text(value: object) -> str:
 def image_files_for_row(row_id: int) -> List[Path]:
     if pd.isna(row_id):
         return []
+
     pattern = f"fila_{int(row_id)}_evidencia_"
-    return sorted([p for p in IMG_DIR.glob(f"{pattern}*.*") if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]])
+
+    return sorted(
+        [
+            p
+            for p in IMG_DIR.glob(f"{pattern}*.*")
+            if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]
+        ]
+    )
 
 
 def img_to_base64(path: Path) -> Optional[str]:
     try:
         data = path.read_bytes()
         ext = path.suffix.lower().lstrip(".") or "jpg"
+
         if ext == "jpg":
             ext = "jpeg"
+
         return f"data:image/{ext};base64," + base64.b64encode(data).decode("ascii")
     except Exception:
         return None
@@ -305,6 +439,7 @@ def apply_reviews(df: pd.DataFrame, reviews: Dict[str, dict]) -> pd.DataFrame:
     for idx, row in out.iterrows():
         key = str(int(row["fila_excel"])) if not pd.isna(row.get("fila_excel")) else ""
         review = reviews.get(key, {})
+
         if review:
             out.at[idx, "estatus"] = review.get("estatus", "Pendiente") or "Pendiente"
             out.at[idx, "supervisor"] = review.get("supervisor", "")
@@ -313,15 +448,23 @@ def apply_reviews(df: pd.DataFrame, reviews: Dict[str, dict]) -> pd.DataFrame:
 
             latc = review.get("latitud_corregida", "")
             lonc = review.get("longitud_corregida", "")
+
             out.at[idx, "latitud_corregida"] = pd.to_numeric(latc, errors="coerce")
             out.at[idx, "longitud_corregida"] = pd.to_numeric(lonc, errors="coerce")
 
     out["latitud_mapa"] = out["latitud_corregida"].combine_first(out["latitud"])
     out["longitud_mapa"] = out["longitud_corregida"].combine_first(out["longitud"])
+
     return out
 
 
-def filter_df(df: pd.DataFrame, distritos, secciones, estatuses, query: str) -> pd.DataFrame:
+def filter_df(
+    df: pd.DataFrame,
+    distritos,
+    secciones,
+    estatuses,
+    query: str,
+) -> pd.DataFrame:
     out = df.copy()
 
     if distritos:
@@ -334,6 +477,7 @@ def filter_df(df: pd.DataFrame, distritos, secciones, estatuses, query: str) -> 
         out = out[out["estatus"].isin(estatuses)]
 
     q = normalize_text(query).lower()
+
     if q:
         cols = [
             c
@@ -348,9 +492,16 @@ def filter_df(df: pd.DataFrame, distritos, secciones, estatuses, query: str) -> 
             ]
             if c in out.columns
         ]
+
         mask = pd.Series(False, index=out.index)
+
         for col in cols:
-            mask = mask | out[col].astype(str).str.lower().str.contains(re.escape(q), na=False, regex=True)
+            mask = mask | out[col].astype(str).str.lower().str.contains(
+                re.escape(q),
+                na=False,
+                regex=True,
+            )
+
         out = out[mask]
 
     return out
@@ -362,8 +513,10 @@ def make_popup_html(row: pd.Series, include_img: bool = True) -> str:
 
     if include_img:
         imgs = image_files_for_row(row_id)
+
         if imgs:
             src = img_to_base64(imgs[0])
+
             if src:
                 img_html = f"""
                 <div style='margin-top:10px'>
@@ -372,6 +525,7 @@ def make_popup_html(row: pd.Series, include_img: bool = True) -> str:
                 """
 
     maps_link = html.escape(str(row.get("link_maps", "")))
+
     link_html = (
         f"<a href='{maps_link}' target='_blank' style='color:{MORENA_GUINDA};font-weight:bold'>Abrir en Google Maps</a>"
         if maps_link
@@ -429,13 +583,13 @@ def make_map(
 
     center = [valid["latitud_mapa"].mean(), valid["longitud_mapa"].mean()]
     m = folium.Map(location=center, zoom_start=13, tiles=None, control_scale=True)
+
     add_tile_layers(m, selected_tile)
 
-    target_layer = (
-        MarkerCluster(name="Lonas agrupadas").add_to(m)
-        if cluster_points
-        else folium.FeatureGroup(name="Lonas", show=True).add_to(m)
-    )
+    if cluster_points:
+        target_layer = MarkerCluster(name="Lonas agrupadas").add_to(m)
+    else:
+        target_layer = folium.FeatureGroup(name="Lonas", show=True).add_to(m)
 
     for _, row in valid.iterrows():
         row_id = int(row["fila_excel"])
@@ -457,8 +611,10 @@ def make_map(
 
     if selected_row_id:
         sel = valid[valid["fila_excel"].astype(int) == int(selected_row_id)]
+
         if not sel.empty:
             row = sel.iloc[0]
+
             folium.Marker(
                 location=[float(row["latitud_mapa"]), float(row["longitud_mapa"])],
                 popup=folium.Popup(make_popup_html(row), max_width=360),
@@ -469,6 +625,7 @@ def make_map(
     Fullscreen().add_to(m)
     MeasureControl(primary_length_unit="meters", secondary_length_unit="kilometers").add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
+
     return m
 
 
@@ -492,16 +649,15 @@ def make_supervision_cluster_map(
 
     center = [valid["latitud_mapa"].mean(), valid["longitud_mapa"].mean()]
 
-    # Zoom inicial amplio para ver el total agrupado; al acercar, se despliegan los puntos.
     m = folium.Map(location=center, zoom_start=8, tiles=None, control_scale=True)
     add_tile_layers(m, selected_tile)
 
     icon_create_function = f"""
     function(cluster) {{
         var count = cluster.getChildCount();
-        var size = count < 10 ? 38 : count < 50 ? 46 : 56;
+        var size = count < 10 ? 42 : count < 50 ? 50 : 60;
         return new L.DivIcon({{
-            html: '<div style="background:{MORENA_DORADO}; color:{MORENA_GUINDA_DARK}; width:' + size + 'px; height:' + size + 'px; line-height:' + size + 'px; border-radius:50%; text-align:center; font-weight:900; border:3px solid white; box-shadow:0 6px 16px rgba(91,15,46,.30); font-size:16px;">' + count + '</div>',
+            html: '<div style="background:{MORENA_GUINDA}; color:white; width:' + size + 'px; height:' + size + 'px; line-height:' + size + 'px; border-radius:50%; text-align:center; font-weight:900; border:4px solid {MORENA_DORADO}; box-shadow:0 8px 20px rgba(74,0,24,.42); font-size:17px;">' + count + '</div>',
             className: 'marker-cluster-morena',
             iconSize: new L.Point(size, size)
         }});
@@ -511,11 +667,13 @@ def make_supervision_cluster_map(
     cluster = MarkerCluster(
         name="Total de lonas por distribución geográfica",
         icon_create_function=icon_create_function,
-        spiderfy_on_max_zoom=True,
-        show_coverage_on_hover=True,
-        zoom_to_bounds_on_click=True,
-        disable_clustering_at_zoom=18,
-        max_cluster_radius=80,
+        options={
+            "spiderfyOnMaxZoom": True,
+            "showCoverageOnHover": True,
+            "zoomToBoundsOnClick": True,
+            "disableClusteringAtZoom": 18,
+            "maxClusterRadius": 80,
+        },
     ).add_to(m)
 
     for _, row in valid.iterrows():
@@ -543,6 +701,7 @@ def make_supervision_cluster_map(
     Fullscreen().add_to(m)
     MeasureControl(primary_length_unit="meters", secondary_length_unit="kilometers").add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
+
     return m
 
 
@@ -552,10 +711,12 @@ def kml_escape(value: object) -> str:
 
 def hex_to_kml_color(hex_color: str, alpha: str = "ff") -> str:
     color = hex_color.lstrip("#")
+
     if len(color) != 6:
-        color = "8A1538"
+        color = "7A0026"
 
     rr, gg, bb = color[0:2], color[2:4], color[4:6]
+
     return f"{alpha}{bb}{gg}{rr}"
 
 
@@ -583,10 +744,17 @@ def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision"
             for _, row in df_s.iterrows():
                 row_id = int(row["fila_excel"])
                 status = str(row.get("estatus", "Pendiente")) or "Pendiente"
-                style = "verificado" if status == "Verificado" else "alerta" if status not in ["Pendiente", ""] else "pendiente"
+
+                if status == "Verificado":
+                    style = "verificado"
+                elif status in ["Pendiente", ""]:
+                    style = "pendiente"
+                else:
+                    style = "alerta"
 
                 imgs = image_files_for_row(row_id)
                 img_html = ""
+
                 if imgs:
                     img_path = f"files/{imgs[0].name}"
                     img_html = f"<br/><br/><img src='{img_path}' width='420'/>"
@@ -633,13 +801,16 @@ def build_kmz_bytes(df: pd.DataFrame, filename_prefix: str = "lonas_supervision"
     kml_text = "\n".join(kml_parts)
 
     buff = io.BytesIO()
+
     with zipfile.ZipFile(buff, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("doc.kml", kml_text.encode("utf-8"))
 
         added = set()
+
         for row_id in valid["fila_excel"].dropna().astype(int).tolist():
             for img in image_files_for_row(row_id):
                 arc = f"files/{img.name}"
+
                 if arc not in added:
                     zf.write(img, arc)
                     added.add(arc)
@@ -653,7 +824,7 @@ def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 def render_kpi(label: str, value: object, note: str = "") -> None:
     note_html = (
-        f"<div style='font-size:.77rem;color:#7b6c72;margin-top:6px'>{html.escape(str(note))}</div>"
+        f"<div style='font-size:.77rem;color:#4A0018;margin-top:6px;font-weight:600'>{html.escape(str(note))}</div>"
         if note
         else ""
     )
@@ -672,21 +843,20 @@ def render_kpi(label: str, value: object, note: str = "") -> None:
 
 def render_status_legend() -> None:
     rows = []
+
     for status in STATUS_OPTIONS:
         rows.append(
-            f"<div style='margin:7px 0'><span class='legend-dot' style='background:{STATUS_COLORS[status]}'></span>{html.escape(status)}</div>"
+            f"<div style='margin:7px 0;font-weight:700;color:#1F171A'><span class='legend-dot' style='background:{STATUS_COLORS[status]}'></span>{html.escape(status)}</div>"
         )
 
     st.markdown("".join(rows), unsafe_allow_html=True)
 
 
-# -----------------------------
-# Carga de datos
-# -----------------------------
 raw = load_csv(MAPEABLES_CSV)
 pendientes = load_csv(PENDIENTES_CSV)
 reviews = load_reviews()
 df = apply_reviews(raw, reviews)
+
 
 st.markdown(
     """
@@ -698,20 +868,20 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 if df.empty:
     st.error("No se encontraron datos mapeables. Verifica que exista data/lonas_mapeables.csv.")
     st.stop()
 
 
-# -----------------------------
-# Sidebar: filtros y mapa
-# -----------------------------
 st.sidebar.markdown("### Filtros")
+
 
 all_distritos = sorted(
     df["distrito_local"].dropna().astype(str).unique().tolist(),
     key=lambda x: (len(x), x),
 )
+
 
 sel_distritos = st.sidebar.multiselect(
     "Distrito local",
@@ -719,19 +889,24 @@ sel_distritos = st.sidebar.multiselect(
     default=all_distritos,
 )
 
+
 seccion_source = df[df["distrito_local"].astype(str).isin(sel_distritos)] if sel_distritos else df
+
 
 all_secciones = sorted(
     seccion_source["seccion"].dropna().astype(str).unique().tolist(),
     key=lambda x: (len(x), x),
 )
 
+
 sel_secciones = st.sidebar.multiselect("Sección", all_secciones)
 sel_estatus = st.sidebar.multiselect("Estatus", STATUS_OPTIONS, default=[])
 query = st.sidebar.text_input("Buscar", placeholder="Colonia, dirección, sección...")
 
+
 st.sidebar.divider()
 st.sidebar.markdown("### Visualización del mapa")
+
 
 map_style = st.sidebar.selectbox(
     "Tipo de mapa base",
@@ -739,12 +914,16 @@ map_style = st.sidebar.selectbox(
     index=0,
 )
 
+
 cluster_points = st.sidebar.checkbox("Agrupar puntos cercanos", value=False)
+
 
 filtered = filter_df(df, sel_distritos, sel_secciones, sel_estatus, query)
 
+
 st.sidebar.divider()
 st.sidebar.markdown("### Acciones rápidas")
+
 
 st.sidebar.download_button(
     "Descargar revisión filtrada CSV",
@@ -755,32 +934,32 @@ st.sidebar.download_button(
 )
 
 
-# -----------------------------
-# KPIs
-# -----------------------------
 k1, k2, k3, k4, k5 = st.columns(5)
+
 
 with k1:
     render_kpi("Registros mapeados", len(df), "con coordenada")
 
+
 with k2:
     render_kpi("En filtro", len(filtered), "según selección")
+
 
 with k3:
     render_kpi("Verificados", int((df["estatus"] == "Verificado").sum()), "validación positiva")
 
+
 with k4:
     render_kpi("Pendientes", int((df["estatus"] == "Pendiente").sum()), "por revisar")
+
 
 with k5:
     render_kpi("Sin coordenada", len(pendientes), "requieren captura")
 
+
 st.write("")
 
 
-# -----------------------------
-# Tabs
-# -----------------------------
 tab_map, tab_supervision_map, tab_summary, tab_review, tab_table, tab_pending, tab_export, tab_help = st.tabs(
     [
         "Mapa",
@@ -826,12 +1005,14 @@ with tab_map:
 
     with c1:
         selected_for_map = st.session_state.get("selected_row_id")
+
         m = make_map(
             filtered,
             selected_for_map,
             selected_tile=map_style,
             cluster_points=cluster_points,
         )
+
         st_folium(m, width=1280, height=680, returned_objects=[])
 
 
@@ -870,6 +1051,7 @@ with tab_supervision_map:
                 .reset_index(name="total")
                 .sort_values("total", ascending=False)
             )
+
             st.dataframe(resumen_dist, hide_index=True, use_container_width=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -900,6 +1082,7 @@ with tab_summary:
                 .size()
                 .reset_index(name="total")
             )
+
             st.dataframe(
                 dist.sort_values(["distrito_local", "seccion"]),
                 hide_index=True,
@@ -909,15 +1092,15 @@ with tab_summary:
     with b:
         st.write("**Estatus de supervisión**")
 
-        status_df = (
-            filtered["estatus"].value_counts().rename_axis("estatus").reset_index(name="total")
-            if not filtered.empty
-            else pd.DataFrame(columns=["estatus", "total"])
-        )
+        if not filtered.empty:
+            status_df = filtered["estatus"].value_counts().rename_axis("estatus").reset_index(name="total")
+        else:
+            status_df = pd.DataFrame(columns=["estatus", "total"])
 
         st.dataframe(status_df, hide_index=True, use_container_width=True)
 
         st.write("**Avance general**")
+
         total = len(df)
         verificados = int((df["estatus"] == "Verificado").sum())
         avance = (verificados / total * 100) if total else 0
@@ -972,6 +1155,7 @@ with tab_review:
 
             if imgs:
                 st.markdown("**Evidencia fotográfica**")
+
                 for img in imgs[:3]:
                     st.image(str(img), caption=img.name, use_container_width=True)
             else:
